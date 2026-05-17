@@ -1410,28 +1410,6 @@ const carScore = document.getElementById("car-score");
 const carPlayer = document.getElementById("car-player");
 const carObstacles = document.getElementById("car-obstacles");
 
-
-let sbGameType = "tic_tac_toe";
-let sbState = {};
-let sbCatalog = [];
-
-const sbGamePicker = document.getElementById("sb-game-picker");
-const sbArenaTtt = document.getElementById("sb-arena-ttt");
-const sbArenaFps = document.getElementById("sb-arena-fps");
-const sbArenaCar = document.getElementById("sb-arena-car");
-const fpsHp = document.getElementById("fps-hp");
-const fpsAmmo = document.getElementById("fps-ammo");
-const fpsScore = document.getElementById("fps-score");
-const fpsWave = document.getElementById("fps-wave");
-const fpsPlayer = document.getElementById("fps-player");
-const fpsEnemies = document.getElementById("fps-enemies");
-const carLane = document.getElementById("car-lane");
-const carSpeed = document.getElementById("car-speed");
-const carDistance = document.getElementById("car-distance");
-const carScore = document.getElementById("car-score");
-const carPlayer = document.getElementById("car-player");
-const carObstacles = document.getElementById("car-obstacles");
-
 function renderGamePicker(games) {
   if (!sbGamePicker) return;
   sbCatalog = games || sbCatalog;
