@@ -546,6 +546,15 @@ async def sandbox_stop(session_id: str):
     return {"ok": True, **stop, "usage": session.get("usage")}
 
 
+@app.post("/api/sandbox/cleanup")
+async def sandbox_cleanup(keep: int = 1):
+    """Stop extra active sandboxes so new immersive sessions can start (tier limit 3)."""
+    result = sandbox.cleanup_extra_sandboxes(keep=max(0, min(keep, 2)))
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "Cleanup failed")
+    return result
+
+
 @app.post("/api/session/{session_id}/attach-capture")
 async def attach_capture(session_id: str, body: AttachCaptureRequest):
     """Link a desktop-capture or uploaded session video for play-by-play indexing."""

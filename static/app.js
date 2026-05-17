@@ -1443,6 +1443,7 @@ const ugCost = document.getElementById("ug-cost");
 const usageSandboxStatus = document.getElementById("usage-sandbox-status");
 const usageSandboxList = document.getElementById("usage-sandbox-list");
 const usageRefreshBtn = document.getElementById("usage-refresh-btn");
+const usageCleanupBtn = document.getElementById("usage-cleanup-btn");
 const sbGamePicker = document.getElementById("sb-game-picker");
 const sbArenaTtt = document.getElementById("sb-arena-ttt");
 const sbArenaFps = document.getElementById("sb-arena-fps");
@@ -1766,9 +1767,15 @@ async function refreshUsagePanel() {
     }
     const status = await api("/api/sandbox/status");
     if (usageSandboxStatus) {
-      usageSandboxStatus.textContent = status.configured
-        ? `${status.sandboxes?.length || 0} sandbox(es) on your account`
-        : "VIDEO_DB_API_KEY not configured";
+      if (!status.configured) {
+        usageSandboxStatus.textContent = "VIDEO_DB_API_KEY not configured";
+      } else if (status.at_limit) {
+        usageSandboxStatus.textContent =
+          `Medium tier limit reached (${status.active_count}/${status.active_limit} active) — click Free sandbox slots or start game to reuse one`;
+      } else {
+        usageSandboxStatus.textContent =
+          `${status.active_count || 0}/${status.active_limit || 3} active · ${status.sandboxes?.length || 0} total on account`;
+      }
     }
     if (usageSandboxList) {
       usageSandboxList.innerHTML = "";
@@ -1784,7 +1791,24 @@ async function refreshUsagePanel() {
       }
     }
   } catch (e) {
-    if (usageSandboxStatus) usageSandboxStatus.textContent = e.message;
+    if (usageSandboxStatus) usageSandboxStatus.textContent = formatApiError(e);
+  }
+}
+
+async function cleanupSandboxes() {
+  if (usageCleanupBtn) usageCleanupBtn.disabled = true;
+  setStatus("Stopping extra sandboxes…", "warn");
+  try {
+    const data = await api("/api/sandbox/cleanup?keep=1", { method: "POST" });
+    setStatus(
+      `Stopped ${data.stopped_count || 0} sandbox(es) · ${data.active_remaining ?? 0} active`,
+      "ok"
+    );
+    await refreshUsagePanel();
+  } catch (e) {
+    setStatus(formatApiError(e), "warn");
+  } finally {
+    if (usageCleanupBtn) usageCleanupBtn.disabled = false;
   }
 }
 
@@ -1821,12 +1845,19 @@ async function startSandboxGame() {
         sbGameType === "tic_tac_toe" ? "Your turn (X)" : "Take your action";
     }
     if (data.sandbox?.sandbox_id && sbSandboxId) {
-      sbSandboxId.textContent = `Sandbox ${data.sandbox.sandbox_id} · ${data.sandbox.status}`;
+      const reused = data.sandbox.reused ? " · reused" : "";
+      sbSandboxId.textContent = `Sandbox ${data.sandbox.sandbox_id} · ${data.sandbox.status}${reused}`;
     }
     renderSessionUsage(data.usage);
-    setStatus("Sandbox ready — play a move", "ok");
+    const reusedMsg = data.sandbox?.reused ? " (reused existing sandbox)" : "";
+    setStatus(`Sandbox ready${reusedMsg} — play a move`, "ok");
   } catch (e) {
-    setStatus(e.message || "Sandbox start failed", "warn");
+    const msg = formatApiError(e);
+    if (msg.includes("Maximum active sandboxes")) {
+      setStatus("At sandbox limit — open Usage → Free sandbox slots, then retry", "warn");
+    } else {
+      setStatus(msg || "Sandbox start failed", "warn");
+    }
   } finally {
     sbBusy = false;
     renderSbBoard();
@@ -1875,6 +1906,7 @@ async function finishSandboxRecap() {
 if (sbBtnNew) sbBtnNew.addEventListener("click", startSandboxGame);
 if (sbBtnFinish) sbBtnFinish.addEventListener("click", finishSandboxRecap);
 if (usageRefreshBtn) usageRefreshBtn.addEventListener("click", refreshUsagePanel);
+if (usageCleanupBtn) usageCleanupBtn.addEventListener("click", cleanupSandboxes);
 
 
 document.querySelectorAll("[data-fps-action]").forEach((btn) => {

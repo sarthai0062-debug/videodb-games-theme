@@ -28,6 +28,7 @@ USAGE_PATH = ROOT_DIR / "data" / "sandbox_usage.json"
 SANDBOX_SESSION_DIR = ROOT_DIR / "data" / "sandbox_sessions"
 
 SANDBOX_HOURLY_USD = {"small": 1.0, "medium": 3.5}
+TIER_ACTIVE_LIMIT = {"small": 3, "medium": 3}
 DEFAULT_TIER = "medium"
 DEFAULT_IDLE_TIMEOUT = 600
 
@@ -166,6 +167,84 @@ def _collection(conn):
     return vdb._collection(conn)
 
 
+def _tier_limit(tier: str) -> int:
+    return TIER_ACTIVE_LIMIT.get(tier.lower(), 3)
+
+
+def _tier_matches(sb: Any, tier: str) -> bool:
+    st = str(getattr(sb, "tier", "") or "").lower()
+    want = tier.lower()
+    return st == want or st.endswith(want)
+
+
+def _list_active_for_tier(conn: Any, tier: str) -> list[Any]:
+    out: list[Any] = []
+    for sb in conn.list_sandboxes():
+        try:
+            sb.refresh()
+        except Exception:
+            pass
+        if _tier_matches(sb, tier) and sb.is_active:
+            out.append(sb)
+    return out
+
+
+def _attach_sandbox_to_session(session: dict[str, Any], sb: Any, *, reused: bool) -> dict[str, Any]:
+    session["sandbox_id"] = sb.id
+    session["sandbox_tier"] = _tier()
+    session["sandbox_status"] = sb.status
+    session["sandbox_stopped"] = False
+    if not session.get("sandbox_started_at"):
+        session["sandbox_started_at"] = time.time()
+    return {
+        "ok": True,
+        "sandbox_id": sb.id,
+        "status": sb.status,
+        "tier": _tier(),
+        "reused": reused,
+    }
+
+
+def _stop_sandbox_by_id(conn: Any, sandbox_id: str) -> bool:
+    try:
+        sb = conn.get_sandbox(sandbox_id)
+        sb.stop(grace=True)
+        try:
+            sb.wait_for_stop(timeout=120, interval=5)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def cleanup_extra_sandboxes(keep: int = 0, tier: str | None = None) -> dict[str, Any]:
+    """Stop active sandboxes on the account until at most `keep` remain (same tier)."""
+    if not vdb.is_videodb_configured():
+        return {"ok": False, "error": "VIDEO_DB_API_KEY not configured"}
+    tier_name = (tier or _tier()).lower()
+    keep = max(0, int(keep))
+    try:
+        conn = _connect()
+        active = _list_active_for_tier(conn, tier_name)
+        to_stop = active[:-keep] if keep else active
+        stopped: list[str] = []
+        for sb in to_stop:
+            if _stop_sandbox_by_id(conn, sb.id):
+                stopped.append(sb.id)
+        remaining = _list_active_for_tier(conn, tier_name)
+        return {
+            "ok": True,
+            "tier": tier_name,
+            "stopped": stopped,
+            "stopped_count": len(stopped),
+            "active_remaining": len(remaining),
+            "limit": _tier_limit(tier_name),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
 def _sandbox_is_active(session: dict[str, Any]) -> bool:
     sandbox_id = session.get("sandbox_id")
     if not sandbox_id:
@@ -185,30 +264,46 @@ def _normalize_game_type(game_type: str | None) -> str:
 
 
 def provision_sandbox(session: dict[str, Any]) -> dict[str, Any]:
-    """Create sandbox if missing; wait until active."""
+    """Reuse an active sandbox when possible; create only if under tier limit."""
     if not vdb.is_videodb_configured():
         return {"ok": False, "error": "VIDEO_DB_API_KEY not configured"}
 
     tier_name = _tier()
-
-    if session.get("sandbox_id"):
-        try:
-            conn = _connect()
-            sb = conn.get_sandbox(session["sandbox_id"])
-            sb.refresh()
-            if sb.is_active:
-                session["sandbox_status"] = sb.status
-                return {"ok": True, "sandbox_id": sb.id, "status": sb.status, "reused": True}
-        except Exception:
-            pass
+    limit = _tier_limit(tier_name)
 
     try:
         conn = _connect()
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+    sandbox_id = session.get("sandbox_id")
+    if sandbox_id:
+        try:
+            sb = conn.get_sandbox(sandbox_id)
+            sb.refresh()
+            if sb.is_active:
+                session["sandbox_status"] = sb.status
+                return _attach_sandbox_to_session(session, sb, reused=True)
+        except Exception:
+            pass
+
+    active = _list_active_for_tier(conn, tier_name)
+    if active:
+        return _attach_sandbox_to_session(session, active[-1], reused=True)
+
+    if len(active) >= limit:
+        cleanup_extra_sandboxes(keep=max(0, limit - 1), tier=tier_name)
+        active = _list_active_for_tier(conn, tier_name)
+        if active:
+            return _attach_sandbox_to_session(session, active[-1], reused=True)
+
+    try:
         sandbox = conn.create_sandbox(tier=tier_name)
         session["sandbox_id"] = sandbox.id
         session["sandbox_tier"] = tier_name
         session["sandbox_status"] = sandbox.status
         session["sandbox_started_at"] = time.time()
+        session["sandbox_stopped"] = False
         sandbox.wait_for_ready(timeout=300, interval=5)
         session["sandbox_status"] = sandbox.status
         return {
@@ -219,7 +314,41 @@ def provision_sandbox(session: dict[str, Any]) -> dict[str, Any]:
             "reused": False,
         }
     except Exception as e:
-        return {"ok": False, "error": str(e)[:300]}
+        err = str(e)
+        if "Maximum active sandboxes" in err:
+            cleanup = cleanup_extra_sandboxes(keep=1, tier=tier_name)
+            active = _list_active_for_tier(conn, tier_name)
+            if active:
+                return _attach_sandbox_to_session(session, active[-1], reused=True)
+            if cleanup.get("stopped_count", 0) > 0:
+                try:
+                    sandbox = conn.create_sandbox(tier=tier_name)
+                    session["sandbox_id"] = sandbox.id
+                    session["sandbox_tier"] = tier_name
+                    session["sandbox_status"] = sandbox.status
+                    session["sandbox_started_at"] = time.time()
+                    session["sandbox_stopped"] = False
+                    sandbox.wait_for_ready(timeout=300, interval=5)
+                    session["sandbox_status"] = sandbox.status
+                    return {
+                        "ok": True,
+                        "sandbox_id": sandbox.id,
+                        "status": sandbox.status,
+                        "tier": tier_name,
+                        "reused": False,
+                        "cleaned_up": cleanup.get("stopped"),
+                    }
+                except Exception as e2:
+                    err = str(e2)
+            return {
+                "ok": False,
+                "error": (
+                    f"{err[:200]} — stopped {cleanup.get('stopped_count', 0)} sandbox(es) "
+                    f"but still at limit. Use Usage → Free sandbox slots."
+                ),
+                "cleanup": cleanup,
+            }
+        return {"ok": False, "error": err[:300]}
 
 
 def generate_flux_turn_art(
@@ -584,24 +713,39 @@ def finish_sandbox_session(session_id: str) -> dict[str, Any]:
 
 def get_status_payload() -> dict[str, Any]:
     configured = vdb.is_videodb_configured()
+    tier_name = _tier()
+    limit = _tier_limit(tier_name)
     sandboxes: list[dict[str, str]] = []
+    active_count = 0
     if configured:
         try:
             conn = _connect()
             for sb in conn.list_sandboxes():
+                try:
+                    sb.refresh()
+                except Exception:
+                    pass
+                st = str(sb.status)
+                is_active = sb.is_active
+                if _tier_matches(sb, tier_name) and is_active:
+                    active_count += 1
                 sandboxes.append(
                     {
                         "id": sb.id,
                         "tier": str(sb.tier),
-                        "status": str(sb.status),
+                        "status": st,
                         "name": str(getattr(sb, "name", "") or ""),
+                        "is_active": is_active,
                     }
                 )
         except Exception:
             pass
     return {
         "configured": configured,
-        "tier": _tier(),
+        "tier": tier_name,
+        "active_limit": limit,
+        "active_count": active_count,
+        "at_limit": active_count >= limit,
         "models": {
             "flux": SandboxModel.FLUX.value,
             "omnivoice": SandboxModel.OMNIVOICE.value,
