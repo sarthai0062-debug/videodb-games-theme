@@ -1142,11 +1142,19 @@ function formatApiError(err) {
 async function api(path, options = {}, attempt = 0) {
   const maxAttempts = 3;
   const url = `${API}${path}`;
+  const isLongJob =
+    path.includes("/sandbox/session/") &&
+    (path.endsWith("/action") || path.endsWith("/finish"));
+  const timeoutMs = isLongJob ? 120000 : 60000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
       ...options,
     });
+    clearTimeout(timer);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       const detail = err.detail || res.statusText;
@@ -1158,12 +1166,61 @@ async function api(path, options = {}, attempt = 0) {
     }
     return res.json();
   } catch (e) {
+    clearTimeout(timer);
+    if (e.name === "AbortError") {
+      throw new Error("Request timed out — try again or check Render is awake");
+    }
     if (attempt < maxAttempts - 1 && (e.message === "Failed to fetch" || e.name === "TypeError")) {
       await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
       return api(path, options, attempt + 1);
     }
     throw e;
   }
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function pollSandboxFlux(maxAttempts = 40) {
+  if (!sandboxSessionId) return null;
+  for (let i = 0; i < maxAttempts; i++) {
+    await sleep(3000);
+    const snap = await api(`/api/sandbox/session/${sandboxSessionId}`);
+    const moves = snap.moves || [];
+    const last = moves[moves.length - 1];
+    if (!last) continue;
+    if (last.flux_image_url) {
+      return {
+        session_id: sandboxSessionId,
+        game_type: snap.game_type,
+        state: snap.state,
+        board: snap.state?.board,
+        finished: snap.state?.finished,
+        winner: snap.state?.winner,
+        last_move: last,
+        turn_media: {
+          image_url: last.flux_image_url,
+          image_id: last.flux_image_id,
+          error: last.flux_error,
+          generation_ok: !last.flux_error,
+          fallback: last.flux_error?.includes("collection") ? "collection_image" : null,
+        },
+        flux_pending: false,
+      };
+    }
+    if (last.flux_status === "failed") {
+      return {
+        session_id: sandboxSessionId,
+        state: snap.state,
+        last_move: last,
+        turn_media: { error: last.flux_error || "FLUX failed", generation_ok: false },
+        flux_pending: false,
+      };
+    }
+    setStatus(`FLUX rendering… (${i + 1}/${maxAttempts})`, "warn");
+  }
+  return null;
 }
 
 async function init() {
@@ -1173,16 +1230,14 @@ async function init() {
     setStatus("Frontend misconfigured", "warn");
     return;
   }
-  try {
-    await refreshVdbHub();
-  } catch (e) {
+  const hubPromise = refreshVdbHub().catch((e) => {
     setConnUi(false, "Offline", null, formatApiError(e));
-  }
-  try {
-    await startGame();
-  } catch (e) {
+  });
+  const gamePromise = startGame().catch((e) => {
     setStatus(formatApiError(e), "warn");
-  }
+  });
+  await Promise.all([hubPromise, gamePromise]);
+  refreshUsagePanel().catch(() => {});
 }
 
 async function startGame() {
@@ -1584,17 +1639,40 @@ function applySbResponse(data) {
 async function sbAction(action) {
   if (sbBusy || sbFinished || !sandboxSessionId) return;
   sbBusy = true;
-  setStatus("FLUX on sandbox compute…", "warn");
+  setStatus("Logging play…", "warn");
   try {
     const data = await api(`/api/sandbox/session/${sandboxSessionId}/action`, {
       method: "POST",
       body: JSON.stringify({ action }),
     });
     applySbResponse(data);
-    if (!data.finished) setStatus("Play logged · FLUX updated", "ok");
+    if (data.flux_pending || data.turn_media?.flux_pending) {
+      setStatus("FLUX rendering on sandbox (15–90s)…", "warn");
+      const polled = await pollSandboxFlux();
+      if (polled) {
+        applySbResponse({ ...data, ...polled, moves_logged: [] });
+        const tm = polled.turn_media || {};
+        setStatus(
+          tm.image_url
+            ? tm.fallback
+              ? "Move logged · collection fallback image"
+              : "Move logged · FLUX ready"
+            : tm.error || "FLUX unavailable",
+          tm.image_url ? "ok" : "warn"
+        );
+      } else {
+        setStatus("Move logged · FLUX still rendering — refresh in a moment", "warn");
+      }
+    } else if (!data.finished) {
+      const tm = data.turn_media || {};
+      setStatus(
+        tm.image_url ? "Play logged · FLUX updated" : tm.error || "Play logged",
+        tm.image_url ? "ok" : "warn"
+      );
+    }
     await refreshUsagePanel();
   } catch (e) {
-    setStatus(e.message, "warn");
+    setStatus(formatApiError(e), "warn");
   } finally {
     sbBusy = false;
     renderSbBoard();

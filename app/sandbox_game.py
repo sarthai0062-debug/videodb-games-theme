@@ -11,10 +11,14 @@ Flow (see https://hackday.videodb.io/sandbox.html):
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from videodb import SandboxModel, SandboxTier, connect
 
@@ -61,7 +65,37 @@ def _flux_config() -> dict[str, Any]:
             cfg["num_inference_steps"] = int(steps)
         except ValueError:
             pass
+    elif os.getenv("RENDER") or (
+        (os.getenv("SANDBOX_ASYNC_FLUX") or "").lower() in ("1", "true", "yes")
+    ):
+        cfg["num_inference_steps"] = 12
     return cfg
+
+
+def _use_async_flux() -> bool:
+    """Render free tier times out HTTP at ~30s; FLUX often needs longer."""
+    _load_env()
+    raw = (os.getenv("SANDBOX_ASYNC_FLUX") or "").strip().lower()
+    if raw in ("0", "false", "no"):
+        return False
+    if raw in ("1", "true", "yes"):
+        return True
+    return bool(os.getenv("RENDER"))
+
+
+def _clean_error(err: str) -> str:
+    text = (err or "").replace("\n", " ").strip()
+    if text.endswith(": None") or text.endswith(": none"):
+        text = text.rsplit(":", 1)[0].strip() or "VideoDB request failed"
+    return text[:240]
+
+
+def _ensure_sandbox_ready(sandbox_id: str) -> None:
+    conn = _connect()
+    sb = conn.get_sandbox(sandbox_id)
+    sb.refresh()
+    if not sb.is_active:
+        sb.wait_for_ready(timeout=180, interval=5)
 
 
 def session_path(session_id: str) -> Path:
@@ -370,6 +404,7 @@ def generate_flux_turn_art(
 
     prompt = ig.flux_prompt(game_type, state, move, coach)
     try:
+        _ensure_sandbox_ready(sandbox_id)
         conn = _connect()
         coll = _collection(conn)
         job = coll.generate_image(
@@ -391,7 +426,7 @@ def generate_flux_turn_art(
             "generation_ok": True,
         }
     except Exception as e:
-        err = str(e).replace("\n", " ")[:240]
+        err = _clean_error(str(e))
         try:
             conn = _connect()
             coll = _collection(conn)
@@ -401,8 +436,9 @@ def generate_flux_turn_art(
                     **empty,
                     "image_url": url,
                     "image_id": img_id,
-                    "error": f"FLUX failed — collection fallback. ({err})",
+                    "error": f"Using collection image (FLUX: {err})",
                     "fallback": "collection_image",
+                    "generation_ok": False,
                 }
         except Exception:
             pass
@@ -568,6 +604,10 @@ def _session_response_payload(
     game_type = _normalize_game_type(session.get("game_type"))
     st = session["state"]
     last = last_moves[-1] if last_moves else {}
+    flux_media = dict(flux) if isinstance(flux, dict) else flux
+    if isinstance(flux_media, dict) and flux_media.get("flux_pending"):
+        flux_media = {**flux_media, "flux_pending": True}
+
     payload: dict[str, Any] = {
         "session_id": session_id,
         "game_type": game_type,
@@ -579,7 +619,10 @@ def _session_response_payload(
         "moves_logged": last_moves,
         "suggestion_text": coach.suggestion_text,
         "suggested_action": coach.suggested_action,
-        "turn_media": flux,
+        "turn_media": flux_media,
+        "flux_pending": bool(
+            isinstance(flux_media, dict) and flux_media.get("flux_pending")
+        ),
         "sandbox_id": sandbox_id,
         "sandbox_status": session.get("sandbox_status"),
         "usage": _session_usage(session),
@@ -632,6 +675,66 @@ def start_sandbox_session(game_type: str = "tic_tac_toe") -> dict[str, Any]:
     }
 
 
+def _apply_flux_to_session_move(session_id: str) -> None:
+    """Background worker: generate FLUX for the latest move and persist."""
+    try:
+        session = load_session(session_id)
+        game_type = _normalize_game_type(session.get("game_type"))
+        moves = session.get("moves") or []
+        if not moves:
+            return
+        target = moves[-1]
+        if target.get("flux_status") == "done":
+            return
+        sandbox_id = session.get("sandbox_id")
+        if not sandbox_id:
+            target["flux_status"] = "failed"
+            target["flux_error"] = "No sandbox"
+            save_session(session_id, session)
+            return
+        coach = ig.CoachResult(
+            narrative=target.get("narrative") or "",
+            suggestion_text=target.get("suggestion_text") or "",
+            suggested_action=target.get("suggested_action") or "",
+            highlight=target.get("highlight_cell"),
+        )
+        flux = generate_flux_turn_art(
+            game_type,
+            session["state"],
+            target,
+            coach,
+            sandbox_id,
+        )
+        target["flux_image_url"] = flux.get("image_url")
+        target["flux_image_id"] = flux.get("image_id")
+        target["flux_status"] = "done" if flux.get("image_url") else "failed"
+        target["flux_error"] = flux.get("error")
+        if flux.get("generation_ok"):
+            usage = _session_usage(session)
+            usage["flux_images"] = int(usage.get("flux_images", 0)) + 1
+        save_session(session_id, session)
+    except Exception as e:
+        logger.exception("FLUX background job failed for %s", session_id)
+        try:
+            session = load_session(session_id)
+            if session.get("moves"):
+                session["moves"][-1]["flux_status"] = "failed"
+                session["moves"][-1]["flux_error"] = _clean_error(str(e))
+                save_session(session_id, session)
+        except Exception:
+            pass
+
+
+def _schedule_flux_job(session_id: str) -> None:
+    thread = threading.Thread(
+        target=_apply_flux_to_session_move,
+        args=(session_id,),
+        daemon=True,
+        name=f"flux-{session_id}",
+    )
+    thread.start()
+
+
 def play_sandbox_action(session_id: str, action: dict[str, Any]) -> dict[str, Any]:
     session = load_session(session_id)
     game_type = _normalize_game_type(session.get("game_type"))
@@ -650,24 +753,40 @@ def play_sandbox_action(session_id: str, action: dict[str, Any]) -> dict[str, An
             raise ValueError(prov.get("error") or "Sandbox not available")
         sandbox_id = session.get("sandbox_id")
 
-    flux = generate_flux_turn_art(
-        game_type,
-        new_state,
-        move_records[-1],
-        coach,
-        sandbox_id or "",
-    )
-    target = session["moves"][-1]
-    target["flux_image_url"] = flux.get("image_url")
-    target["flux_image_id"] = flux.get("image_id")
-    if flux.get("generation_ok"):
-        usage = _session_usage(session)
-        usage["flux_images"] = int(usage.get("flux_images", 0)) + 1
-
-    save_session(session_id, session)
+    flux: dict[str, Any]
+    flux_pending = False
+    if _use_async_flux():
+        for m in move_records:
+            m["flux_status"] = "pending"
+        flux = {
+            "image_url": None,
+            "image_id": None,
+            "error": None,
+            "generation_ok": None,
+            "flux_pending": True,
+        }
+        flux_pending = True
+        save_session(session_id, session)
+        _schedule_flux_job(session_id)
+    else:
+        flux = generate_flux_turn_art(
+            game_type,
+            new_state,
+            move_records[-1],
+            coach,
+            sandbox_id or "",
+        )
+        target = session["moves"][-1]
+        target["flux_image_url"] = flux.get("image_url")
+        target["flux_image_id"] = flux.get("image_id")
+        target["flux_status"] = "done" if flux.get("image_url") else "failed"
+        if flux.get("generation_ok"):
+            usage = _session_usage(session)
+            usage["flux_images"] = int(usage.get("flux_images", 0)) + 1
+        save_session(session_id, session)
 
     opponent = move_records[1] if len(move_records) > 1 else None
-    return _session_response_payload(
+    payload = _session_response_payload(
         session_id,
         session,
         last_moves=move_records,
@@ -676,6 +795,8 @@ def play_sandbox_action(session_id: str, action: dict[str, Any]) -> dict[str, An
         sandbox_id=sandbox_id,
         opponent_move=opponent,
     )
+    payload["flux_pending"] = flux_pending
+    return payload
 
 
 def play_sandbox_move(session_id: str, cell: int) -> dict[str, Any]:

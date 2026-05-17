@@ -92,6 +92,7 @@ class SandboxFluxMedia(BaseModel):
     error: str | None = None
     generation_ok: bool | None = None
     fallback: str | None = None
+    flux_pending: bool = False
 
 
 class SandboxStartRequest(BaseModel):
@@ -128,6 +129,7 @@ class SandboxActionResponse(BaseModel):
     suggestion_text: str | None = None
     suggested_action: str | None = None
     turn_media: SandboxFluxMedia
+    flux_pending: bool = False
     sandbox_id: str | None = None
     sandbox_status: str | None = None
     usage: dict[str, Any]
