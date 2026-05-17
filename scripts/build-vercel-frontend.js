@@ -12,9 +12,14 @@ const distDir = path.join(root, "dist");
 const apiBase = (process.env.VIDEODB_API_BASE || "").replace(/\/$/, "");
 
 if (!apiBase) {
-  console.warn(
-    "WARN: VIDEODB_API_BASE is empty — frontend will call same-origin /api (broken on Vercel). Set it in Vercel project env."
-  );
+  const msg =
+    "VIDEODB_API_BASE is required (your Render URL, no trailing slash). " +
+    "Set it in Vercel → Project → Settings → Environment Variables.";
+  if (process.env.VERCEL) {
+    console.error(msg);
+    process.exit(1);
+  }
+  console.warn(`WARN: ${msg}`);
 }
 
 fs.rmSync(distDir, { recursive: true, force: true });
