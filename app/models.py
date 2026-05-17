@@ -142,12 +142,13 @@ SandboxMoveResponse = SandboxActionResponse
 
 class SandboxFinishResponse(BaseModel):
     session_id: str
-    winner: str | None
-    moves: list[dict[str, Any]]
+    winner: str | None = None
+    moves: list[dict[str, Any]] = []
     recap_stream_url: str | None = None
     recap_player_url: str | None = None
     recap_embed_url: str | None = None
     recap_error: str | None = None
-    usage: dict[str, Any]
-    global_usage: dict[str, Any]
-    message: str
+    recap_pending: bool = False
+    usage: dict[str, Any] = {}
+    global_usage: dict[str, Any] = {}
+    message: str = ""

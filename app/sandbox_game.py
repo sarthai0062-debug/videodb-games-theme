@@ -803,25 +803,91 @@ def play_sandbox_move(session_id: str, cell: int) -> dict[str, Any]:
     return play_sandbox_action(session_id, {"cell": cell})
 
 
+def _apply_recap_to_session(session_id: str) -> None:
+    """Background worker: OmniVoice + timeline recap."""
+    try:
+        session = load_session(session_id)
+        session["recap_status"] = "building"
+        save_session(session_id, session)
+        recap = build_sandbox_recap(session)
+        session["recap_stream_url"] = recap.get("stream_url")
+        session["recap_player_url"] = recap.get("player_url")
+        session["recap_embed_url"] = recap.get("embed_url")
+        session["recap_error"] = recap.get("error")
+        session["recap_status"] = "done" if recap.get("stream_url") else "failed"
+        stop_session_sandbox(session)
+        _merge_session_usage_to_global(session)
+        save_session(session_id, session)
+    except Exception as e:
+        logger.exception("Recap background job failed for %s", session_id)
+        try:
+            session = load_session(session_id)
+            session["recap_status"] = "failed"
+            session["recap_error"] = _clean_error(str(e))
+            save_session(session_id, session)
+        except Exception:
+            pass
+
+
+def _schedule_recap_job(session_id: str) -> None:
+    thread = threading.Thread(
+        target=_apply_recap_to_session,
+        args=(session_id,),
+        daemon=True,
+        name=f"recap-{session_id}",
+    )
+    thread.start()
+
+
+def _use_async_recap() -> bool:
+    return _use_async_flux()
+
+
 def finish_sandbox_session(session_id: str) -> dict[str, Any]:
     session = load_session(session_id)
+    game_type = _normalize_game_type(session.get("game_type"))
+    winner = session["state"].get("winner")
+
+    if _use_async_recap():
+        session["recap_status"] = "pending"
+        save_session(session_id, session)
+        _schedule_recap_job(session_id)
+        return {
+            "session_id": session_id,
+            "game_type": game_type,
+            "state": session["state"],
+            "winner": winner,
+            "moves": session["moves"],
+            "recap_stream_url": None,
+            "recap_player_url": None,
+            "recap_embed_url": None,
+            "recap_error": None,
+            "recap_pending": True,
+            "usage": _session_usage(session),
+            "global_usage": load_global_usage(),
+            "message": "Building cloud recap on sandbox (1–3 min)…",
+        }
+
     recap = build_sandbox_recap(session)
     session["recap_stream_url"] = recap.get("stream_url")
     session["recap_player_url"] = recap.get("player_url")
     session["recap_embed_url"] = recap.get("embed_url")
+    session["recap_status"] = "done" if recap.get("stream_url") else "failed"
+    session["recap_error"] = recap.get("error")
     stop_session_sandbox(session)
     _merge_session_usage_to_global(session)
     save_session(session_id, session)
     return {
         "session_id": session_id,
-        "game_type": _normalize_game_type(session.get("game_type")),
+        "game_type": game_type,
         "state": session["state"],
-        "winner": session["state"].get("winner"),
+        "winner": winner,
         "moves": session["moves"],
         "recap_stream_url": recap.get("stream_url"),
         "recap_player_url": recap.get("player_url"),
         "recap_embed_url": recap.get("embed_url"),
         "recap_error": recap.get("error"),
+        "recap_pending": False,
         "usage": _session_usage(session),
         "global_usage": load_global_usage(),
         "message": (

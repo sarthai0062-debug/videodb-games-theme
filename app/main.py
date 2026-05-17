@@ -140,6 +140,17 @@ async def index():
 async def health():
     mode = vdb.get_media_mode()
     gen = vdb.get_generation_status()
+    if vdb.is_videodb_configured() and mode.value == "economy":
+        try:
+            inv = vdb.get_collection_inventory()
+            if inv.get("ok"):
+                gen = {
+                    **gen,
+                    "collection_images": inv.get("image_count", 0),
+                    "collection_videos": inv.get("video_count", 0),
+                }
+        except Exception:
+            pass
     return {
         "ok": True,
         "videodb_configured": vdb.is_videodb_configured(),
@@ -491,7 +502,11 @@ async def sandbox_get_session(session_id: str):
         "sandbox_id": session.get("sandbox_id"),
         "sandbox_status": session.get("sandbox_status"),
         "usage": session.get("usage"),
+        "recap_status": session.get("recap_status"),
+        "recap_stream_url": session.get("recap_stream_url"),
         "recap_player_url": session.get("recap_player_url"),
+        "recap_embed_url": session.get("recap_embed_url"),
+        "recap_error": session.get("recap_error"),
     }
 
 

@@ -4,15 +4,55 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
 
 API = os.getenv("PROD_API", "https://videodb-play-api.onrender.com").rstrip("/")
 ORIGIN = os.getenv("PROD_ORIGIN", "https://videodb-games-theme.vercel.app")
+_USE_CURL = os.getenv("VALIDATE_USE_CURL", "").lower() in ("1", "true", "yes")
+
+
+def _req_curl(method: str, path: str, body: dict | None = None, timeout: int = 120) -> tuple[int, dict | str]:
+    url = f"{API}{path}"
+    cmd = [
+        "curl",
+        "-sS",
+        "-m",
+        str(timeout),
+        "-X",
+        method,
+        "-H",
+        f"Origin: {ORIGIN}",
+        "-H",
+        "Content-Type: application/json",
+        "-w",
+        "\n%{http_code}",
+    ]
+    if body is not None:
+        cmd += ["-d", json.dumps(body)]
+    cmd.append(url)
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError as e:
+        out = e.output or ""
+    if "\n" not in out:
+        return 0, {"detail": out or "curl failed"}
+    raw, code_s = out.rsplit("\n", 1)
+    try:
+        code = int(code_s.strip())
+    except ValueError:
+        return 0, {"detail": out}
+    try:
+        return code, json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        return code, raw
 
 
 def req(method: str, path: str, body: dict | None = None, timeout: int = 120) -> tuple[int, dict | str]:
+    if _USE_CURL:
+        return _req_curl(method, path, body, timeout)
     data = json.dumps(body).encode() if body is not None else None
     r = urllib.request.Request(
         f"{API}{path}",
@@ -29,6 +69,8 @@ def req(method: str, path: str, body: dict | None = None, timeout: int = 120) ->
             if "application/json" in (res.headers.get("Content-Type") or ""):
                 return res.status, json.loads(raw)
             return res.status, raw.decode("utf-8", errors="replace")
+    except urllib.error.URLError:
+        return _req_curl(method, path, body, timeout)
     except urllib.error.HTTPError as e:
         payload = e.read().decode()
         try:

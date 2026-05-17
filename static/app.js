@@ -1182,6 +1182,56 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function syncSbFromServer(snap) {
+  if (!snap && sandboxSessionId) {
+    snap = await api(`/api/sandbox/session/${sandboxSessionId}`);
+  }
+  if (!snap) return null;
+  sbState = snap.state || sbState;
+  if (snap.state?.board) sbBoard = snap.state.board;
+  sbFinished = snap.state?.finished ?? sbFinished;
+  sbHighlight = snap.state?.highlight_cell ?? null;
+  sbMoves = Array.isArray(snap.moves) ? [...snap.moves] : sbMoves;
+  renderSbGallery(sbMoves);
+  const last = sbMoves[sbMoves.length - 1];
+  if (last) {
+    showSbTurn({
+      state: snap.state,
+      board: snap.state?.board,
+      finished: snap.state?.finished,
+      winner: snap.state?.winner,
+      last_move: last,
+      turn_media: {
+        image_url: last.flux_image_url,
+        image_id: last.flux_image_id,
+        error: last.flux_error,
+        generation_ok: Boolean(last.flux_image_url) && !last.flux_error,
+      },
+      sandbox_id: snap.sandbox_id,
+      sandbox_status: snap.sandbox_status,
+      usage: snap.usage,
+    });
+  }
+  showSbArena();
+  if (sbFinished) {
+    sbResult.hidden = false;
+    const w = snap.state?.winner;
+    sbResult.textContent =
+      w === "victory"
+        ? "Victory!"
+        : w === "defeat"
+          ? "Defeat"
+          : w === "draw"
+            ? "Draw"
+            : w
+              ? `${w} wins`
+              : "Game over";
+    if (sbTurnLabel) sbTurnLabel.textContent = "Finished — build recap";
+    if (sbBtnFinish) sbBtnFinish.disabled = false;
+  }
+  return snap;
+}
+
 async function pollSandboxFlux(maxAttempts = 40) {
   if (!sandboxSessionId) return null;
   for (let i = 0; i < maxAttempts; i++) {
@@ -1190,35 +1240,27 @@ async function pollSandboxFlux(maxAttempts = 40) {
     const moves = snap.moves || [];
     const last = moves[moves.length - 1];
     if (!last) continue;
-    if (last.flux_image_url) {
-      return {
-        session_id: sandboxSessionId,
-        game_type: snap.game_type,
-        state: snap.state,
-        board: snap.state?.board,
-        finished: snap.state?.finished,
-        winner: snap.state?.winner,
-        last_move: last,
-        turn_media: {
-          image_url: last.flux_image_url,
-          image_id: last.flux_image_id,
-          error: last.flux_error,
-          generation_ok: !last.flux_error,
-          fallback: last.flux_error?.includes("collection") ? "collection_image" : null,
-        },
-        flux_pending: false,
-      };
-    }
-    if (last.flux_status === "failed") {
-      return {
-        session_id: sandboxSessionId,
-        state: snap.state,
-        last_move: last,
-        turn_media: { error: last.flux_error || "FLUX failed", generation_ok: false },
-        flux_pending: false,
-      };
+    if (last.flux_image_url || last.flux_status === "failed") {
+      await syncSbFromServer(snap);
+      return snap;
     }
     setStatus(`FLUX rendering… (${i + 1}/${maxAttempts})`, "warn");
+  }
+  return null;
+}
+
+async function pollSandboxRecap(maxAttempts = 60) {
+  if (!sandboxSessionId) return null;
+  for (let i = 0; i < maxAttempts; i++) {
+    await sleep(5000);
+    const snap = await api(`/api/sandbox/session/${sandboxSessionId}`);
+    if (snap.recap_status === "done" && (snap.recap_stream_url || snap.recap_embed_url)) {
+      return snap;
+    }
+    if (snap.recap_status === "failed") {
+      return snap;
+    }
+    setStatus(`Building recap… (${i + 1}/${maxAttempts})`, "warn");
   }
   return null;
 }
@@ -1609,10 +1651,18 @@ function applySbResponse(data) {
   sbFinished = data.finished;
   sbHighlight = data.highlight_cell ?? null;
   if (data.moves_logged?.length) {
-    sbMoves.push(...data.moves_logged);
+    for (const m of data.moves_logged) {
+      if (!sbMoves.some((x) => x.move_number === m.move_number)) sbMoves.push(m);
+    }
   } else {
-    sbMoves.push(data.last_move);
-    if (data.opponent_move) sbMoves.push(data.opponent_move);
+    if (data.last_move) {
+      const n = data.last_move.move_number;
+      if (!sbMoves.some((x) => x.move_number === n)) sbMoves.push(data.last_move);
+    }
+    if (data.opponent_move) {
+      const on = data.opponent_move.move_number;
+      if (!sbMoves.some((x) => x.move_number === on)) sbMoves.push(data.opponent_move);
+    }
   }
   showSbTurn(data);
   renderSbGallery(sbMoves);
@@ -1650,15 +1700,13 @@ async function sbAction(action) {
       setStatus("FLUX rendering on sandbox (15–90s)…", "warn");
       const polled = await pollSandboxFlux();
       if (polled) {
-        applySbResponse({ ...data, ...polled, moves_logged: [] });
-        const tm = polled.turn_media || {};
+        const last = (polled.moves || [])[polled.moves.length - 1];
+        const img = last?.flux_image_url;
         setStatus(
-          tm.image_url
-            ? tm.fallback
-              ? "Move logged · collection fallback image"
-              : "Move logged · FLUX ready"
-            : tm.error || "FLUX unavailable",
-          tm.image_url ? "ok" : "warn"
+          img
+            ? "Move logged · FLUX ready"
+            : last?.flux_error || "FLUX unavailable",
+          img ? "ok" : "warn"
         );
       } else {
         setStatus("Move logged · FLUX still rendering — refresh in a moment", "warn");
@@ -1961,16 +2009,22 @@ async function finishSandboxRecap() {
     renderSessionUsage(data.usage);
     renderGlobalUsage(data.global_usage);
 
-    if (data.recap_stream_url || data.recap_embed_url) {
+    let recap = data;
+    if (data.recap_pending) {
+      setStatus(data.message || "Building cloud recap…", "warn");
+      const snap = await pollSandboxRecap();
+      if (snap) recap = { ...data, ...snap };
+    }
+    if (recap.recap_stream_url || recap.recap_embed_url) {
       showSbPlayer({
         label: "Full game recap — stored in VideoDB cloud",
-        streamUrl: data.recap_stream_url,
-        playerUrl: data.recap_player_url,
-        embedUrl: data.recap_embed_url,
+        streamUrl: recap.recap_stream_url,
+        playerUrl: recap.recap_player_url,
+        embedUrl: recap.recap_embed_url,
       });
-      setStatus(data.message, "ok");
+      setStatus(recap.message || "Sandbox recap ready in VideoDB cloud.", "ok");
     } else {
-      setStatus(data.recap_error || data.message || "Recap failed", "warn");
+      setStatus(recap.recap_error || recap.message || "Recap failed", "warn");
     }
     await refreshUsagePanel();
   } catch (e) {
