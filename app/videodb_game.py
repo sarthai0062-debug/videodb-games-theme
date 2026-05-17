@@ -153,14 +153,19 @@ def trim_video_clip(conn: Any, video_id: str, seconds: float) -> dict[str, Any]:
 def get_collection_id() -> str:
     """Target VideoDB collection for all ingest, generative, and index calls."""
     _load_env()
-    return (
-        os.getenv("VIDEODB_COLLECTION_ID") or "c-3cb42f31-1525-4170-9180-0d49a207b1bb"
-    ).strip()
+    return (os.getenv("VIDEODB_COLLECTION_ID") or "").strip()
 
 
 def get_collection_name() -> str:
+    """Optional display name check — empty means accept any collection name from API."""
     _load_env()
-    return (os.getenv("VIDEODB_COLLECTION_NAME") or "test tic tac toe").strip()
+    return (os.getenv("VIDEODB_COLLECTION_NAME") or "").strip()
+
+
+def collection_name_matches(expected: str, actual: str | None) -> bool:
+    if not expected:
+        return True
+    return expected.strip().lower() == (actual or "").strip().lower()
 
 
 # What this hackathon app stores in VideoDB (visible in Console under the collection).
@@ -216,14 +221,16 @@ def test_connection() -> dict[str, Any]:
         name = getattr(coll, "name", None) or ""
         expected = get_collection_name()
         configured = get_collection_id()
+        id_ok = not configured or coll_id == configured
         return {
             "ok": True,
             "collection_id": getattr(coll, "id", None),
             "collection_name": name,
-            "collection_name_expected": expected,
-            "collection_name_ok": name.strip().lower() == expected.strip().lower(),
-            "collection_id_configured": configured,
-            "collection_id_resolved": coll_id != configured,
+            "collection_name_expected": expected or None,
+            "collection_name_ok": collection_name_matches(expected, name),
+            "collection_id_configured": configured or None,
+            "collection_id_resolved": bool(configured) and coll_id != configured,
+            "collection_id_ok": id_ok,
         }
     except Exception as e:
         return {"ok": False, "error": str(e)[:300]}
@@ -472,8 +479,8 @@ def _build_collection_inventory(
         "collection_name": name,
         "collection_name_expected": target_name,
         "collection_id_configured": target_id,
-        "collection_match": coll_id == target_id,
-        "collection_name_ok": name.strip().lower() == target_name.strip().lower(),
+        "collection_match": (not target_id) or coll_id == target_id,
+        "collection_name_ok": collection_name_matches(target_name, name),
         "console_url": "https://console.videodb.io",
         "video_count": len(videos),
         "image_count": len(images),
@@ -1130,12 +1137,13 @@ def resolve_collection_id(conn: Any) -> str:
         return _resolved_collection_id
 
     configured = get_collection_id()
-    try:
-        coll = conn.get_collection(configured)
-        _resolved_collection_id = coll.id
-        return _resolved_collection_id
-    except Exception:
-        pass
+    if configured:
+        try:
+            coll = conn.get_collection(configured)
+            _resolved_collection_id = coll.id
+            return _resolved_collection_id
+        except Exception:
+            pass
 
     try:
         coll = conn.get_collection("default")

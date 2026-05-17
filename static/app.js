@@ -312,16 +312,13 @@ function renderVdbStatus(data) {
   renderConfigTags(data);
 
   if (data.connection_ok) {
-    const resolvedNote = data.collection_id_resolved
-      ? " (using your account collection — update VIDEODB_COLLECTION_ID in .env)"
-      : "";
-    setConnUi(
-      true,
-      "Connected",
-      data.collection_id,
-      null,
-      (data.collection_name || "") + resolvedNote
-    );
+    let label = data.collection_name || "Collection";
+    if (data.collection_id_resolved) {
+      label += " (resolved from account default)";
+    } else if (data.collection_name_ok === false && data.collection_name_expected) {
+      label += ` (env name: ${data.collection_name_expected})`;
+    }
+    setConnUi(true, "Connected", data.collection_id, null, label);
   } else if (data.api_configured) {
     setConnUi(false, "Not connected", null, data.connection_error);
   } else {
@@ -409,9 +406,17 @@ function renderCollectionInventory(inv) {
   }
   if (vdbCollStatus) {
     const parts = [];
-    if (inv.collection_match) parts.push("Using configured collection ID");
-    else parts.push("Collection ID mismatch — check .env");
-    if (inv.collection_name_ok) parts.push("name matches");
+    if (inv.collection_match) {
+      parts.push(`Connected · ${inv.collection_name || inv.collection_id}`);
+    } else {
+      parts.push("Collection ID mismatch — update VIDEODB_COLLECTION_ID on Render");
+    }
+    if (
+      inv.collection_name_expected &&
+      inv.collection_name_ok === false
+    ) {
+      parts.push(`display name is "${inv.collection_name}"`);
+    }
     parts.push(`mode ${inv.current_media_mode} · recap ${inv.current_recap_mode}`);
     vdbCollStatus.textContent = parts.join(" · ");
   }
@@ -601,13 +606,13 @@ async function refreshVdbHub() {
     if (data.connection_ok) {
       setStatus(`VideoDB connected · ${data.media_mode}`, "ok");
     } else if (data.api_configured) {
-      setStatus("Test connection", "warn");
+      setStatus(data.connection_error || "Test connection", "warn");
     } else {
-      setStatus("Add API key", "warn");
+      setStatus("Add API key on Render", "warn");
     }
   } catch (e) {
-    setConnUi(false, "Offline", null, e.message);
-    setStatus("Start server", "warn");
+    setConnUi(false, "Offline", null, formatApiError(e));
+    setStatus("API unreachable — retrying…", "warn");
   }
 }
 
@@ -711,8 +716,8 @@ async function refreshVdbStatus() {
       setStatus("Add API key", "warn");
     }
   } catch (e) {
-    setConnUi(false, "Offline", null, e.message);
-    setStatus("Start server", "warn");
+    setConnUi(false, "Offline", null, formatApiError(e));
+    setStatus("API unreachable", "warn");
   }
 }
 
@@ -721,10 +726,17 @@ async function testVdbConnection() {
   setConnUi(false, "Testing…", null, null);
   try {
     const data = await api("/api/videodb/test-connection", { method: "POST" });
-    setConnUi(true, "Connected", data.collection_id, null, data.collection_name);
+    if (!data.ok) {
+      throw new Error(data.error || "Connection failed");
+    }
+    let label = data.collection_name || "Collection";
+    if (data.collection_name_expected && !data.collection_name_ok) {
+      label += ` (API name; optional env: ${data.collection_name_expected})`;
+    }
+    setConnUi(true, "Connected", data.collection_id, null, label);
     await refreshVdbHub();
   } catch (e) {
-    setConnUi(false, "Failed", null, e.message);
+    setConnUi(false, "Failed", null, formatApiError(e));
   } finally {
     if (vdbTestBtn) vdbTestBtn.disabled = false;
   }
@@ -1117,22 +1129,60 @@ function showTurnResult(data) {
   }
 }
 
-async function api(path, options = {}) {
-  const res = await fetch(`${API}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || res.statusText);
+function formatApiError(err) {
+  const msg = err?.message || String(err);
+  if (msg === "Failed to fetch" || msg.includes("NetworkError")) {
+    return API
+      ? "Cannot reach API (Render may be waking up — wait 30s and refresh)"
+      : "API URL missing — set VIDEODB_API_BASE on Vercel";
   }
-  return res.json();
+  return msg;
+}
+
+async function api(path, options = {}, attempt = 0) {
+  const maxAttempts = 3;
+  const url = `${API}${path}`;
+  try {
+    const res = await fetch(url, {
+      headers: { "Content-Type": "application/json" },
+      ...options,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const detail = err.detail || res.statusText;
+      if (res.status >= 500 && attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        return api(path, options, attempt + 1);
+      }
+      throw new Error(detail);
+    }
+    return res.json();
+  } catch (e) {
+    if (attempt < maxAttempts - 1 && (e.message === "Failed to fetch" || e.name === "TypeError")) {
+      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+      return api(path, options, attempt + 1);
+    }
+    throw e;
+  }
 }
 
 async function init() {
   switchSection("videodb");
-  await refreshVdbHub();
-  await startGame();
+  if (!API) {
+    setConnUi(false, "No API URL", null, "Set VIDEODB_API_BASE on Vercel to your Render URL");
+    setStatus("Frontend misconfigured", "warn");
+    return;
+  }
+  try {
+    await refreshVdbHub();
+  } catch (e) {
+    setConnUi(false, "Offline", null, formatApiError(e));
+  }
+  try {
+    await startGame();
+  } catch (e) {
+    setStatus(formatApiError(e), "warn");
+  }
 }
 
 async function startGame() {

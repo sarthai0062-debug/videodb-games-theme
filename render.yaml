@@ -11,6 +11,8 @@ services:
         sync: false
       - key: VIDEODB_COLLECTION_ID
         sync: false
+      - key: VIDEODB_COLLECTION_NAME
+        value: new collection
       - key: VIDEODB_MEDIA_MODE
         value: economy
       - key: VIDEODB_RECAP
