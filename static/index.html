@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VideoDB · Tic-Tac-Toe Play-by-Play</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css?v=11" />
+</head>
+<body>
+  <div class="app">
+    <nav class="sidenav" aria-label="Main navigation">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <span class="brand-name">VideoDB</span>
+          <span class="brand-tag">Play-by-Play</span>
+        </div>
+      </div>
+
+      <nav class="nav-groups" aria-label="App sections">
+        <div class="nav-group">
+          <p class="nav-group-label">Limited plan demo</p>
+          <ul class="nav-tabs" role="tablist">
+            <li>
+              <button type="button" class="nav-tab active" data-section="videodb" role="tab" aria-selected="true">
+                <span class="nav-icon" aria-hidden="true">◆</span>
+                VideoDB
+              </button>
+            </li>
+            <li>
+              <button type="button" class="nav-tab" data-section="play" role="tab" aria-selected="false">
+                <span class="nav-icon" aria-hidden="true">▦</span>
+                Play
+              </button>
+            </li>
+          </ul>
+        </div>
+        <div class="nav-group">
+          <p class="nav-group-label">Sandbox compute plan</p>
+          <ul class="nav-tabs" role="tablist">
+            <li>
+              <button type="button" class="nav-tab" data-section="sandbox-game" role="tab" aria-selected="false">
+                <span class="nav-icon" aria-hidden="true">◎</span>
+                Immersive game
+              </button>
+            </li>
+            <li>
+              <button type="button" class="nav-tab" data-section="sandbox-usage" role="tab" aria-selected="false">
+                <span class="nav-icon" aria-hidden="true">◈</span>
+                Usage
+              </button>
+            </li>
+          </ul>
+        </div>
+      </nav>
+
+      <div class="sidenav-foot">
+        <div class="conn-pill">
+          <span id="vdb-dot" class="status-dot" aria-hidden="true"></span>
+          <span id="vdb-conn-label">Checking…</span>
+        </div>
+        <a class="docs-link" href="https://docs.videodb.io" target="_blank" rel="noopener">Docs</a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="page-title">Play with VideoDB</h1>
+          <p id="session-label" class="session-id">Session —</p>
+        </div>
+        <div id="status-bar" class="status-pill">Starting…</div>
+      </header>
+
+      <section id="section-videodb" class="view active" role="tabpanel">
+        <div class="hero">
+          <p id="hub-pitch" class="hub-pitch"></p>
+          <div id="hub-config-tags" class="tag-row"></div>
+        </div>
+
+        <div class="card vdb-player-card featured">
+          <div class="card-head">
+            <h2>VideoDB player</h2>
+            <p id="vdb-player-label" class="meta-line">Generative clips and collection videos play here.</p>
+          </div>
+          <div id="vdb-player-wrap" class="vdb-player-wrap empty">
+            <iframe
+              id="vdb-player-iframe"
+              title="VideoDB embed player"
+              allow="autoplay; fullscreen"
+              allowfullscreen
+              hidden
+            ></iframe>
+            <video id="vdb-player-video" controls playsinline hidden></video>
+            <p class="vdb-player-placeholder">No clip loaded — play a move or pick an asset below</p>
+          </div>
+          <div class="btn-row">
+            <a
+              id="vdb-open-player"
+              class="btn primary"
+              href="https://console.videodb.io"
+              target="_blank"
+              rel="noopener noreferrer"
+              hidden
+            >Open in VideoDB</a>
+            <button type="button" id="vdb-open-video-btn" class="btn ghost" disabled>Open selected video</button>
+          </div>
+        </div>
+
+        <div class="card collection-card">
+          <div class="card-head">
+            <h2>Collection assets</h2>
+            <p class="hint">Videos and AI-generated board images from your hackathon collection.</p>
+          </div>
+          <dl class="stat-grid compact">
+            <div>
+              <dt>Name</dt>
+              <dd id="vdb-coll-name">—</dd>
+            </div>
+            <div>
+              <dt>ID</dt>
+              <dd id="vdb-coll-id" class="mono">—</dd>
+            </div>
+            <div>
+              <dt>Assets</dt>
+              <dd id="vdb-coll-count">—</dd>
+            </div>
+          </dl>
+          <p id="vdb-coll-status" class="meta-line"></p>
+          <div id="vdb-coll-grid" class="asset-grid" aria-label="Collection videos and images"></div>
+          <p id="vdb-coll-empty" class="coll-empty hint" hidden>No assets yet — set VIDEODB_MEDIA_MODE=image or video and play a game.</p>
+          <table id="vdb-util-table" class="models-table" aria-label="How this app uses VideoDB">
+            <thead>
+              <tr>
+                <th>What we store</th>
+                <th>VideoDB API</th>
+                <th>Console</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <p id="vdb-coll-local-note" class="hint"></p>
+          <a id="vdb-coll-console" class="btn primary" href="https://console.videodb.io" target="_blank" rel="noopener">Open collection in Console</a>
+        </div>
+
+        <div class="card" id="vdb-turn-card">
+          <div class="card-head">
+            <h2>Latest turn · AI visual</h2>
+            <p id="vdb-turn-narrative" class="meta-line">Play on the Play tab — generated board art appears here when image/video mode is on.</p>
+          </div>
+          <div id="vdb-turn-wrap" class="turn-media-wrap empty">
+            <img id="vdb-turn-image" alt="AI-generated board state" hidden />
+            <video id="vdb-turn-video" controls playsinline hidden></video>
+            <p class="turn-media-placeholder">No turn media yet</p>
+          </div>
+          <p id="vdb-turn-suggestion" class="suggestion-coach" hidden></p>
+          <p id="vdb-media-error" class="media-error" hidden></p>
+          <p id="vdb-media-fallback" class="media-fallback-note" hidden></p>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <h2>Session</h2>
+            <p id="hub-session-status" class="meta-line">Loading…</p>
+            <dl class="stat-grid compact">
+              <div>
+                <dt>Session</dt>
+                <dd id="vdb-session-id" class="mono">—</dd>
+              </div>
+              <div>
+                <dt>Moves</dt>
+                <dd id="vdb-move-count">0</dd>
+              </div>
+              <div>
+                <dt>Scene index</dt>
+                <dd id="vdb-scene-index" class="mono">—</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div class="card">
+            <h2>API &amp; connection</h2>
+            <p id="hub-key-line" class="meta-line"></p>
+            <p id="hub-video-count" class="meta-line"></p>
+            <p id="vdb-collection" class="meta-line"></p>
+            <p id="vdb-conn-error" class="error-line" hidden></p>
+            <div class="btn-row">
+              <button type="button" id="vdb-test-btn" class="btn primary">Test connection</button>
+              <button type="button" id="vdb-refresh-btn" class="btn ghost">Refresh</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Models used</h2>
+          <p class="hint">Economy = free local analysis. Image/video modes call <code>generate_image</code> / <code>generate_video</code>.</p>
+          <table id="hub-models" class="models-table" aria-label="VideoDB models">
+            <thead>
+              <tr>
+                <th>Feature</th>
+                <th>API</th>
+                <th>Model</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <h2>Capabilities</h2>
+          <ul id="hub-capabilities" class="cap-list"></ul>
+        </div>
+
+        <div class="card">
+          <h2>Play-by-play index</h2>
+          <p class="hint">NFL-style scene index on a capture video from your collection.</p>
+          <label class="field">
+            <span>From collection</span>
+            <select id="vdb-video-select" disabled>
+              <option value="">— connect to load videos —</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Video ID</span>
+            <input type="text" id="vdb-video-id" placeholder="vid-…" />
+          </label>
+          <p id="vdb-index-status" class="meta-line"></p>
+          <div class="btn-row">
+            <button type="button" id="vdb-attach-btn" class="btn primary" disabled>Index moves</button>
+            <button type="button" id="vdb-export-btn" class="btn ghost" disabled>Export JSON</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Search</h2>
+          <label class="field">
+            <span>Query</span>
+            <input type="text" id="vdb-search-query" placeholder="e.g. blocked winning line, blunder" />
+          </label>
+          <div class="btn-row">
+            <button type="button" id="vdb-search-btn" class="btn primary" disabled>Search</button>
+          </div>
+          <p id="vdb-search-msg" class="meta-line"></p>
+          <ul id="vdb-search-results" class="search-results"></ul>
+        </div>
+
+        <div class="card">
+          <h2>Play-by-play recap</h2>
+          <p class="hint">Local recap is free. Cloud timeline compiles in VideoDB.</p>
+          <div class="btn-row">
+            <button id="btn-finish" type="button" class="btn primary" disabled>View local recap</button>
+            <button type="button" id="vdb-cloud-recap-btn" class="btn ghost" disabled>Build cloud timeline</button>
+          </div>
+          <div id="recap-wrap" class="recap-inline empty">
+            <p class="placeholder">Complete a game to unlock recap.</p>
+            <div id="recap-slideshow" class="recap-slideshow" hidden>
+              <p id="recap-title" class="recap-title"></p>
+              <div id="recap-board" class="recap-board" aria-label="Recap board"></div>
+              <p id="recap-move-meta" class="recap-move-meta"></p>
+              <p id="recap-move-text" class="recap-move-text"></p>
+              <div class="recap-controls">
+                <button type="button" id="recap-prev" class="btn ghost">Prev</button>
+                <button type="button" id="recap-play" class="btn ghost">Play</button>
+                <button type="button" id="recap-next" class="btn ghost">Next</button>
+              </div>
+              <p id="recap-counter" class="recap-counter"></p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Move log</h2>
+          <pre id="vdb-move-log" class="code-block">Play a game first.</pre>
+        </div>
+
+        <details class="card card-details">
+          <summary>Best use cases &amp; docs</summary>
+          <div id="hub-use-cases" class="use-case-grid"></div>
+          <ul id="hub-docs" class="doc-list"></ul>
+        </details>
+      </section>
+
+      <section id="section-play" class="view" role="tabpanel" hidden>
+        <div class="play-layout">
+          <div class="card game-card">
+            <div class="row-meta">
+              <span id="turn-label">Your turn (X)</span>
+              <span id="media-mode-badge" class="mode-badge">economy</span>
+            </div>
+            <div id="board" class="board" aria-label="Tic tac toe board"></div>
+            <div class="row-actions">
+              <button id="btn-new" type="button" class="btn ghost">New game</button>
+            </div>
+            <p id="result" class="result" hidden></p>
+          </div>
+
+          <div class="card analysis-card">
+            <h2>Move analysis</h2>
+            <p id="narrative" class="narrative">Make a move to log play-by-play context.</p>
+            <div id="suggestion-box" class="suggestion-box" hidden>
+              <span class="suggestion-label">Coach says</span>
+              <p id="suggestion-text" class="suggestion-text"></p>
+            </div>
+            <p id="play-media-error" class="media-error" hidden></p>
+            <p id="play-media-fallback" class="media-fallback-note" hidden></p>
+            <div id="play-turn-wrap" class="turn-media-wrap empty">
+              <img id="play-turn-image" alt="AI board from this turn" hidden />
+              <video id="play-turn-video" controls playsinline hidden></video>
+              <p class="turn-media-placeholder">Turn visual appears when VIDEODB_MEDIA_MODE=image or video</p>
+            </div>
+            <p class="hint">Full player, collection, and search live on the <strong>VideoDB</strong> tab.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-sandbox-game" class="view" role="tabpanel" hidden>
+        <div class="hero sandbox-hero">
+          <p class="hub-pitch">
+            Pick a game — <strong>tic-tac-toe</strong>, <strong>arena FPS</strong>, or <strong>neon drift</strong>. Every play logs to VideoDB; FLUX renders the moment; OmniVoice compiles your full run.
+          </p>
+          <div class="tag-row">
+            <span class="tag">FLUX · SandboxModel</span>
+            <span class="tag">OmniVoice recap</span>
+            <span class="tag" id="sb-tier-tag">medium tier</span>
+          </div>
+        </div>
+
+        <div class="card vdb-player-card featured">
+          <div class="card-head">
+            <h2>Sandbox player</h2>
+            <p id="sb-player-label" class="meta-line">Recap stream plays here after you finish the game.</p>
+          </div>
+          <div id="sb-player-wrap" class="vdb-player-wrap empty">
+            <iframe id="sb-player-iframe" title="Sandbox recap player" allow="autoplay; fullscreen" allowfullscreen hidden></iframe>
+            <video id="sb-player-video" controls playsinline hidden></video>
+            <p class="vdb-player-placeholder">Play moves below — FLUX art updates each turn</p>
+          </div>
+          <div class="btn-row">
+            <a id="sb-open-player" class="btn primary" href="https://player.videodb.io" target="_blank" rel="noopener noreferrer" hidden>Open in VideoDB</a>
+          </div>
+        </div>
+
+        <div class="card game-picker-card">
+          <h2>Choose your game</h2>
+          <p class="hint">Same sandbox powers all three — start a new session when switching games.</p>
+          <div id="sb-game-picker" class="game-picker" role="tablist" aria-label="Immersive games"></div>
+        </div>
+
+        <div class="play-layout sandbox-layout">
+          <div class="card game-card">
+            <div class="row-meta">
+              <span id="sb-turn-label">Select a game, then start sandbox</span>
+              <span id="sb-sandbox-pill" class="mode-badge">sandbox</span>
+            </div>
+
+            <div id="sb-arena-ttt" class="immersive-arena">
+              <div id="sb-board" class="board" aria-label="Tic tac toe board"></div>
+            </div>
+
+            <div id="sb-arena-fps" class="immersive-arena" hidden>
+              <dl class="fps-hud stat-grid compact">
+                <div><dt>HP</dt><dd id="fps-hp">100</dd></div>
+                <div><dt>Ammo</dt><dd id="fps-ammo">24</dd></div>
+                <div><dt>Score</dt><dd id="fps-score">0</dd></div>
+                <div><dt>Wave</dt><dd id="fps-wave">1</dd></div>
+              </dl>
+              <div class="fps-field" id="fps-field" aria-label="Arena map">
+                <div class="fps-crosshair" aria-hidden="true">+</div>
+                <div id="fps-player" class="fps-player" aria-label="You"></div>
+                <div id="fps-enemies" class="fps-enemies"></div>
+              </div>
+              <div class="btn-row fps-controls">
+                <button type="button" class="btn ghost" data-fps-action='{"type":"move","direction":"up"}'>↑</button>
+                <button type="button" class="btn ghost" data-fps-action='{"type":"move","direction":"left"}'>←</button>
+                <button type="button" class="btn primary" data-fps-action='{"type":"shoot"}'>Fire</button>
+                <button type="button" class="btn ghost" data-fps-action='{"type":"move","direction":"right"}'>→</button>
+                <button type="button" class="btn ghost" data-fps-action='{"type":"move","direction":"down"}'>↓</button>
+                <button type="button" class="btn ghost" data-fps-action='{"type":"reload"}'>Reload</button>
+              </div>
+            </div>
+
+            <div id="sb-arena-car" class="immersive-arena" hidden>
+              <dl class="car-hud stat-grid compact">
+                <div><dt>Lane</dt><dd id="car-lane">1</dd></div>
+                <div><dt>Speed</dt><dd id="car-speed">1.0×</dd></div>
+                <div><dt>Distance</dt><dd id="car-distance">0m</dd></div>
+                <div><dt>Score</dt><dd id="car-score">0</dd></div>
+              </dl>
+              <div class="car-road" id="car-road" aria-label="Highway">
+                <div class="car-lane-markers" aria-hidden="true"></div>
+                <div id="car-player" class="car-player"></div>
+                <div id="car-obstacles" class="car-obstacles"></div>
+              </div>
+              <div class="btn-row car-controls">
+                <button type="button" class="btn ghost" data-car-action='{"type":"steer","direction":"left"}'>← Lane</button>
+                <button type="button" class="btn primary" data-car-action='{"type":"boost"}'>Boost</button>
+                <button type="button" class="btn ghost" data-car-action='{"type":"steer","direction":"right"}'>Lane →</button>
+              </div>
+            </div>
+            <div class="row-actions">
+              <button type="button" id="sb-btn-new" class="btn ghost">New sandbox session</button>
+              <button type="button" id="sb-btn-finish" class="btn primary" disabled>Build cloud recap</button>
+            </div>
+            <p id="sb-result" class="result" hidden></p>
+            <p id="sb-sandbox-id" class="meta-line mono"></p>
+          </div>
+
+          <div class="card analysis-card sandbox-coach-card">
+            <h2>VideoDB coach · recommended action</h2>
+            <p id="sb-narrative" class="narrative">Pick a game, start sandbox, then every play gets FLUX art + tactical advice on your compute pool.</p>
+            <div id="sb-suggestion-box" class="suggestion-box" hidden>
+              <span class="suggestion-label">Recommended</span>
+              <p id="sb-suggestion-text" class="suggestion-text"></p>
+            </div>
+            <p id="sb-flux-error" class="media-error" hidden></p>
+            <div id="sb-turn-wrap" class="turn-media-wrap empty">
+              <img id="sb-turn-image" alt="FLUX board from sandbox" hidden />
+              <p class="turn-media-placeholder">FLUX image appears after each turn</p>
+            </div>
+            <h3 class="subhead">Move gallery</h3>
+            <div id="sb-move-gallery" class="move-gallery" aria-label="FLUX images per move"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Session usage (live)</h2>
+          <dl class="stat-grid compact" id="sb-session-usage">
+            <div><dt>FLUX images</dt><dd id="sb-u-flux">0</dd></div>
+            <div><dt>OmniVoice</dt><dd id="sb-u-voice">0</dd></div>
+            <div><dt>Sandbox runtime</dt><dd id="sb-u-runtime">0s</dd></div>
+            <div><dt>Est. cost</dt><dd id="sb-u-cost">$0.00</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section id="section-sandbox-usage" class="view" role="tabpanel" hidden>
+        <div class="hero">
+          <p class="hub-pitch">Track hackathon sandbox credits — runtime billing, FLUX generations, and OmniVoice recap jobs.</p>
+        </div>
+
+        <div class="card">
+          <h2>Global usage</h2>
+          <p class="hint">Persisted across sandbox sessions on this machine. <a href="https://hackday.videodb.io/sandbox.html" target="_blank" rel="noopener">Sandbox pricing guide →</a></p>
+          <dl class="stat-grid" id="usage-global-stats">
+            <div><dt>Sessions</dt><dd id="ug-sessions">0</dd></div>
+            <div><dt>FLUX images</dt><dd id="ug-flux">0</dd></div>
+            <div><dt>OmniVoice jobs</dt><dd id="ug-voice">0</dd></div>
+            <div><dt>Timelines</dt><dd id="ug-timelines">0</dd></div>
+            <div><dt>Sandbox runtime</dt><dd id="ug-runtime">0s</dd></div>
+            <div><dt>Estimated spend</dt><dd id="ug-cost">$0.00</dd></div>
+          </dl>
+        </div>
+
+        <div class="card">
+          <h2>Pricing reference</h2>
+          <table class="models-table" aria-label="Sandbox pricing">
+            <thead><tr><th>Tier</th><th>Rate</th><th>Models</th></tr></thead>
+            <tbody>
+              <tr><td><code>small</code></td><td>$1 / hour</td><td>OmniVoice, GEMMA 4 E2B, QWEN 9B</td></tr>
+              <tr><td><code>medium</code></td><td>$3.50 / hour</td><td>FLUX, GEMMA 4 31B, larger VLMs</td></tr>
+            </tbody>
+          </table>
+          <p class="hint">This app uses <code>medium</code> so FLUX + OmniVoice run on one sandbox (<code>VIDEODB_SANDBOX_TIER</code> in .env).</p>
+        </div>
+
+        <div class="card">
+          <h2>Active sandboxes</h2>
+          <p id="usage-sandbox-status" class="meta-line">Loading…</p>
+          <ul id="usage-sandbox-list" class="cap-list"></ul>
+          <div class="btn-row">
+            <button type="button" id="usage-refresh-btn" class="btn primary">Refresh</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/config.js?v=1"></script>
+  <script src="/static/app.js?v=13"></script>
+</body>
+</html>

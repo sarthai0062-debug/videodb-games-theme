@@ -1,0 +1,11 @@
+.venv
+.git
+.env
+dist
+node_modules
+__pycache__
+*.pyc
+.DS_Store
+data/sessions/*.json
+data/sandbox_sessions/*.json
+data/sandbox_usage.json
