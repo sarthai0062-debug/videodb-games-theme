@@ -28,6 +28,7 @@ from app import videodb_game as vdb
 VALID_GAMES = frozenset({"tic_tac_toe", "fps", "car"})
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+BAD_SANDBOXES_PATH = ROOT_DIR / "data" / "bad_sandboxes.json"
 USAGE_PATH = ROOT_DIR / "data" / "sandbox_usage.json"
 SANDBOX_SESSION_DIR = ROOT_DIR / "data" / "sandbox_sessions"
 
@@ -211,6 +212,35 @@ def _tier_matches(sb: Any, tier: str) -> bool:
     return st == want or st.endswith(want)
 
 
+def _load_bad_sandbox_ids() -> set[str]:
+    if not BAD_SANDBOXES_PATH.exists():
+        return set()
+    try:
+        data = json.loads(BAD_SANDBOXES_PATH.read_text())
+        return {str(x) for x in data if x}
+    except (json.JSONDecodeError, TypeError):
+        return set()
+
+
+def _mark_sandbox_bad(sandbox_id: str) -> None:
+    if not sandbox_id:
+        return
+    bad = _load_bad_sandbox_ids()
+    bad.add(sandbox_id)
+    BAD_SANDBOXES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    BAD_SANDBOXES_PATH.write_text(json.dumps(sorted(bad), indent=2))
+
+
+def _is_sandbox_bad(sandbox_id: str | None) -> bool:
+    return bool(sandbox_id and sandbox_id in _load_bad_sandbox_ids())
+
+
+def _pick_reusable_sandbox(conn: Any, tier: str) -> Any | None:
+    active = _list_active_for_tier(conn, tier)
+    good = [sb for sb in active if not _is_sandbox_bad(sb.id)]
+    return good[-1] if good else None
+
+
 def _list_active_for_tier(conn: Any, tier: str) -> list[Any]:
     out: list[Any] = []
     for sb in conn.list_sandboxes():
@@ -221,6 +251,20 @@ def _list_active_for_tier(conn: Any, tier: str) -> list[Any]:
         if _tier_matches(sb, tier) and sb.is_active:
             out.append(sb)
     return out
+
+
+def _rotate_sandbox(session: dict[str, Any]) -> dict[str, Any]:
+    """Mark current sandbox unhealthy and attach a fresh medium pool."""
+    old = session.get("sandbox_id")
+    if old:
+        _mark_sandbox_bad(old)
+        try:
+            _stop_sandbox_by_id(_connect(), old)
+        except Exception:
+            pass
+    session.pop("sandbox_id", None)
+    session["sandbox_status"] = None
+    return provision_sandbox(session)
 
 
 def _attach_sandbox_to_session(session: dict[str, Any], sb: Any, *, reused: bool) -> dict[str, Any]:
@@ -311,6 +355,9 @@ def provision_sandbox(session: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": str(e)[:300]}
 
     sandbox_id = session.get("sandbox_id")
+    if sandbox_id and _is_sandbox_bad(sandbox_id):
+        session.pop("sandbox_id", None)
+        sandbox_id = None
     if sandbox_id:
         try:
             sb = conn.get_sandbox(sandbox_id)
@@ -321,15 +368,16 @@ def provision_sandbox(session: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             pass
 
-    active = _list_active_for_tier(conn, tier_name)
-    if active:
-        return _attach_sandbox_to_session(session, active[-1], reused=True)
+    reusable = _pick_reusable_sandbox(conn, tier_name)
+    if reusable:
+        return _attach_sandbox_to_session(session, reusable, reused=True)
 
+    active = _list_active_for_tier(conn, tier_name)
     if len(active) >= limit:
         cleanup_extra_sandboxes(keep=max(0, limit - 1), tier=tier_name)
-        active = _list_active_for_tier(conn, tier_name)
-        if active:
-            return _attach_sandbox_to_session(session, active[-1], reused=True)
+        reusable = _pick_reusable_sandbox(conn, tier_name)
+        if reusable:
+            return _attach_sandbox_to_session(session, reusable, reused=True)
 
     try:
         sandbox = conn.create_sandbox(tier=tier_name)
@@ -351,9 +399,9 @@ def provision_sandbox(session: dict[str, Any]) -> dict[str, Any]:
         err = str(e)
         if "Maximum active sandboxes" in err:
             cleanup = cleanup_extra_sandboxes(keep=1, tier=tier_name)
-            active = _list_active_for_tier(conn, tier_name)
-            if active:
-                return _attach_sandbox_to_session(session, active[-1], reused=True)
+            reusable = _pick_reusable_sandbox(conn, tier_name)
+            if reusable:
+                return _attach_sandbox_to_session(session, reusable, reused=True)
             if cleanup.get("stopped_count", 0) > 0:
                 try:
                     sandbox = conn.create_sandbox(tier=tier_name)
@@ -391,6 +439,9 @@ def generate_flux_turn_art(
     move: dict[str, Any],
     coach: ig.CoachResult,
     sandbox_id: str,
+    session: dict[str, Any] | None = None,
+    *,
+    _retried: bool = False,
 ) -> dict[str, Any]:
     """FLUX image on sandbox compute for the completed turn."""
     empty: dict[str, Any] = {
@@ -402,18 +453,22 @@ def generate_flux_turn_art(
     if not sandbox_id:
         return {**empty, "error": "No active sandbox"}
 
-    prompt = ig.flux_prompt(game_type, state, move, coach)
+    prompt = ig.flux_prompt(game_type, state, move, coach)[:2000]
+    cfg = _flux_config()
     try:
         _ensure_sandbox_ready(sandbox_id)
         conn = _connect()
         coll = _collection(conn)
-        job = coll.generate_image(
+        image = coll.generate_image(
             prompt=prompt,
+            aspect_ratio="16:9",
             model_name=SandboxModel.FLUX,
             sandbox_id=sandbox_id,
-            config=_flux_config(),
+            config=cfg if cfg else None,
+            wait=True,
+            timeout=900,
+            poll_interval=5,
         )
-        image = job.wait(timeout=900, interval=5) if hasattr(job, "wait") else job
         if not image or not getattr(image, "id", None):
             raise ValueError("FLUX returned no image")
         url = vdb._resolve_image_url(image)
@@ -427,22 +482,44 @@ def generate_flux_turn_art(
         }
     except Exception as e:
         err = _clean_error(str(e))
+        stale = (
+            "invalid request" in err.lower()
+            or "no image" in err.lower()
+            or "failed" in err.lower()
+        )
+        if session is not None and stale and not _retried:
+            prov = _rotate_sandbox(session)
+            if prov.get("ok") and session.get("sandbox_id"):
+                return generate_flux_turn_art(
+                    game_type,
+                    state,
+                    move,
+                    coach,
+                    session["sandbox_id"],
+                    session=session,
+                    _retried=True,
+                )
         try:
             conn = _connect()
             coll = _collection(conn)
             url, img_id = vdb._fallback_collection_image(coll)
             if url:
+                note = (
+                    "Sandbox was rotated — showing a collection still."
+                    if _retried
+                    else f"Using collection image (FLUX: {err})"
+                )
                 return {
                     **empty,
                     "image_url": url,
                     "image_id": img_id,
-                    "error": f"Using collection image (FLUX: {err})",
+                    "error": note,
                     "fallback": "collection_image",
                     "generation_ok": False,
                 }
         except Exception:
             pass
-        return {**empty, "error": err}
+        return {**empty, "error": err or "FLUX generation failed"}
 
 
 def build_sandbox_recap(session: dict[str, Any]) -> dict[str, Any]:
@@ -704,6 +781,7 @@ def _apply_flux_to_session_move(session_id: str) -> None:
             target,
             coach,
             sandbox_id,
+            session=session,
         )
         target["flux_image_url"] = flux.get("image_url")
         target["flux_image_id"] = flux.get("image_id")
@@ -775,6 +853,7 @@ def play_sandbox_action(session_id: str, action: dict[str, Any]) -> dict[str, An
             move_records[-1],
             coach,
             sandbox_id or "",
+            session=session,
         )
         target = session["moves"][-1]
         target["flux_image_url"] = flux.get("image_url")
