@@ -67,6 +67,20 @@ VIDEODB_API_BASE=https://your-api.onrender.com node scripts/build-vercel-fronten
 npx serve dist
 ```
 
+### GitHub Actions (git deployment)
+
+Every push to `main` runs [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml):
+
+1. Install deps, import-check the API, build the Vercel `dist/` bundle.
+2. **Render** — auto-deploys when the Render service is connected to this repo; optionally set a **Deploy Hook** URL as repo secret `RENDER_DEPLOY_HOOK` to force a deploy from CI.
+3. **Vercel** — auto-deploys when the Vercel project is connected to this repo; for CLI deploy from Actions, add secrets:
+   - `VERCEL_TOKEN`
+   - `VERCEL_ORG_ID`
+   - `VERCEL_PROJECT_ID`
+   - (optional) `VIDEODB_API_BASE` if not using the default Render URL in the workflow.
+
+Manual redeploy: **Actions** → **Deploy** → **Run workflow**.
+
 ### 4. Docker (API only, local)
 
 ```bash

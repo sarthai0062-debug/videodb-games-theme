@@ -1,0 +1,99 @@
+# Git deployment: push to main → test → optional Render hook + Vercel CLI deploy.
+# Render also auto-deploys from Git when the service is connected in the Render dashboard.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+env:
+  VIDEODB_API_BASE: https://videodb-play-api.onrender.com
+  PROD_API: https://videodb-play-api.onrender.com
+  PROD_ORIGIN: https://videodb-games-theme.vercel.app
+
+jobs:
+  test:
+    name: Test & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Import app modules
+        run: python3 -c "from app import main, sandbox_game; print('imports ok')"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build Vercel frontend
+        run: node scripts/build-vercel-frontend.js
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+          retention-days: 7
+
+  trigger-render:
+    name: Trigger Render API deploy
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Render deploy hook
+        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
+        run: curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
+      - name: Render git deploy note
+        if: ${{ secrets.RENDER_DEPLOY_HOOK == '' }}
+        run: |
+          echo "No RENDER_DEPLOY_HOOK secret — relying on Render Git auto-deploy from main."
+          echo "API: https://videodb-play-api.onrender.com"
+
+  deploy-vercel:
+    name: Deploy frontend (Vercel CLI)
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && secrets.VERCEL_TOKEN != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: "--prod"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          VIDEODB_API_BASE: ${{ env.VIDEODB_API_BASE }}
+
+  smoke-test:
+    name: Smoke test production
+    runs-on: ubuntu-latest
+    needs: [test, trigger-render]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Wait for Render rollout
+        run: sleep 90
+
+      - name: Validate production API
+        run: python3 scripts/validate_production.py
+        continue-on-error: true
