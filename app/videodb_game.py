@@ -969,6 +969,164 @@ def search_session_footage(
     return {"results": [], "message": "No matches found", "source": "none"}
 
 
+def get_env_config_payload() -> dict[str, Any]:
+    """
+    Human-readable manifest of every VideoDB env variable used by the app.
+    Powers the on-screen "Configuration" panel so the user can see what each
+    option in .env controls without leaving the UI.
+    """
+    _load_env()
+    media = get_media_mode().value
+    recap = get_recap_mode()
+    scene = get_scene_model()
+    tier = (os.getenv("VIDEODB_SANDBOX_TIER") or "medium").strip().lower()
+    gen_sec = get_video_generate_duration()
+    play_sec = get_video_playback_seconds()
+
+    def mode_options(current: str, options: list[tuple[str, str, str]]) -> list[dict[str, Any]]:
+        return [
+            {"value": v, "label": label, "desc": desc, "current": v == current}
+            for v, label, desc in options
+        ]
+
+    return {
+        "ok": True,
+        "env_file": ".env",
+        "docs_url": "https://hackday.videodb.io/sandbox.html",
+        "console_url": "https://console.videodb.io",
+        "groups": [
+            {
+                "id": "media",
+                "title": "Per-move media",
+                "summary": "Controls what (if anything) VideoDB generates each turn.",
+                "variables": [
+                    {
+                        "name": "VIDEODB_MEDIA_MODE",
+                        "current": media,
+                        "default": "economy",
+                        "kind": "enum",
+                        "summary": "Which generative API is called when you click a cell.",
+                        "options": mode_options(media, [
+                            ("economy", "Economy · free",
+                             "No generative VideoDB calls per move. Local board only."),
+                            ("voice", "Voice · low cost",
+                             "Adds one OmniVoice narration to the cloud recap (no per-turn visual)."),
+                            ("image", "Image · medium cost",
+                             "Calls coll.generate_image() each turn (one still per move)."),
+                            ("video", "Video · high cost",
+                             "Calls coll.generate_video() each turn (5–8s clip — slow + expensive)."),
+                        ]),
+                    },
+                    {
+                        "name": "VIDEODB_VIDEO_GENERATE_SEC",
+                        "current": gen_sec,
+                        "default": 5,
+                        "kind": "int",
+                        "range": "5–8",
+                        "summary": (
+                            "Duration passed to generate_video() — VideoDB requires 5–8 seconds. "
+                            "Only used when VIDEODB_MEDIA_MODE=video."
+                        ),
+                    },
+                    {
+                        "name": "VIDEODB_VIDEO_PLAYBACK_SEC",
+                        "current": play_sec,
+                        "default": 3,
+                        "kind": "float",
+                        "range": "1–8",
+                        "summary": (
+                            "Length of the trimmed clip shown in the UI (Timeline editor trims "
+                            "the longer generated video down). Set ≤ generate_sec."
+                        ),
+                    },
+                ],
+            },
+            {
+                "id": "recap",
+                "title": "End-of-game recap",
+                "summary": "Picks the recap renderer when the game finishes.",
+                "variables": [
+                    {
+                        "name": "VIDEODB_RECAP",
+                        "current": recap,
+                        "default": "local",
+                        "kind": "enum",
+                        "summary": "How the play-by-play recap is rendered after the game.",
+                        "options": mode_options(recap, [
+                            ("local", "Local · free",
+                             "Browser slideshow built from the move log — zero VideoDB credits."),
+                            ("cloud", "Cloud · uses credits",
+                             "Compiles a VideoDB Timeline → hosted HLS stream on player.videodb.io."),
+                        ]),
+                    },
+                ],
+            },
+            {
+                "id": "scene",
+                "title": "Scene indexing",
+                "summary": "Model used by video.index_scenes() for play-by-play search.",
+                "variables": [
+                    {
+                        "name": "VIDEODB_SCENE_MODEL",
+                        "current": scene,
+                        "default": "basic",
+                        "kind": "enum",
+                        "summary": "Cost vs accuracy trade-off for scene indexing.",
+                        "options": mode_options(scene, [
+                            ("basic", "basic · cheapest",
+                             "Fastest scene index. Good enough for tic-tac-toe captures."),
+                            ("pro", "pro · balanced",
+                             "More accurate descriptions; higher credit usage."),
+                            ("ultra", "ultra · best",
+                             "Highest quality VLM; recommended for long real-world footage."),
+                        ]),
+                    },
+                ],
+            },
+            {
+                "id": "sandbox",
+                "title": "Sandbox compute (Immersive tab)",
+                "summary": "Dedicated VideoDB pool for FLUX + OmniVoice + RTStream models.",
+                "variables": [
+                    {
+                        "name": "VIDEODB_SANDBOX_TIER",
+                        "current": tier,
+                        "default": "medium",
+                        "kind": "enum",
+                        "summary": (
+                            "Sandbox machine size — must fit the largest model you call. "
+                            "FLUX + GEMMA_4_31B require medium."
+                        ),
+                        "options": mode_options(tier, [
+                            ("small", "small · $1/hr",
+                             "OmniVoice, GEMMA 4 E2B, QWEN 9B. 4 parallel sandboxes max."),
+                            ("medium", "medium · $3.50/hr",
+                             "FLUX, GEMMA 4 31B, larger VLMs. 2 parallel sandboxes max."),
+                        ]),
+                    },
+                    {
+                        "name": "VIDEODB_SANDBOX_IDLE_TIMEOUT",
+                        "current": int(os.getenv("VIDEODB_SANDBOX_IDLE_TIMEOUT") or 600),
+                        "default": 600,
+                        "kind": "int",
+                        "summary": (
+                            "Seconds of inactivity before VideoDB stops the sandbox "
+                            "(create_sandbox idle_timeout + app timer). Default 600 = 10 min."
+                        ),
+                    },
+                    {
+                        "name": "VIDEODB_SANDBOX_STOP_ON_STARTUP",
+                        "current": (os.getenv("VIDEODB_SANDBOX_STOP_ON_STARTUP") or "true"),
+                        "default": "true",
+                        "kind": "bool",
+                        "summary": "Stop all active sandboxes when the API server starts.",
+                    },
+                ],
+            },
+        ],
+    }
+
+
 def get_status_payload() -> dict[str, Any]:
     """Full VideoDB panel data for the sidebar."""
     media = get_media_mode()

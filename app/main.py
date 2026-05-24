@@ -65,6 +65,22 @@ if _serve_static and STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.on_event("startup")
+def _sandbox_startup_cleanup() -> None:
+    """Stop sandboxes left running from prior dev sessions (avoids $3.50/hr medium leak)."""
+    try:
+        result = sandbox.stop_orphan_sandboxes_on_startup()
+        if result.get("stopped_count"):
+            import logging
+
+            logging.getLogger("app.main").info(
+                "Stopped %s orphan sandbox(es) on startup",
+                result["stopped_count"],
+            )
+    except Exception:
+        pass
+
+
 def _new_session(capture_mode: bool = False) -> dict[str, Any]:
     session_id = str(uuid.uuid4())[:8]
     state = GameState()
@@ -162,6 +178,12 @@ async def health():
             "Set VIDEODB_RECAP=cloud only if you need a hosted timeline video."
         ),
     }
+
+
+@app.get("/api/videodb/config")
+async def videodb_env_config():
+    """Human-readable .env manifest for the on-screen Configuration panel."""
+    return vdb.get_env_config_payload()
 
 
 @app.get("/api/videodb/status")
@@ -555,15 +577,15 @@ async def sandbox_stop(session_id: str):
         session = sandbox.load_session(session_id)
     except FileNotFoundError:
         raise HTTPException(404, "Sandbox session not found") from None
-    stop = sandbox.stop_session_sandbox(session)
+    stop = sandbox.stop_session_sandbox(session, session_id=session_id)
     sandbox._merge_session_usage_to_global(session)
     sandbox.save_session(session_id, session)
     return {"ok": True, **stop, "usage": session.get("usage")}
 
 
 @app.post("/api/sandbox/cleanup")
-async def sandbox_cleanup(keep: int = 1):
-    """Stop extra active sandboxes so new immersive sessions can start (tier limit 3)."""
+async def sandbox_cleanup(keep: int = 0):
+    """Stop active sandboxes (default keep=0 — stops all on your tier to cut compute bill)."""
     result = sandbox.cleanup_extra_sandboxes(keep=max(0, min(keep, 2)))
     if not result.get("ok"):
         raise HTTPException(400, result.get("error") or "Cleanup failed")

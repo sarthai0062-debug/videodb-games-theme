@@ -19,6 +19,10 @@ services:
         value: local
       - key: VIDEODB_SANDBOX_TIER
         value: medium
+      - key: VIDEODB_SANDBOX_IDLE_TIMEOUT
+        value: "600"
+      - key: VIDEODB_SANDBOX_STOP_ON_STARTUP
+        value: "true"
       - key: SERVE_STATIC
         value: "false"
       - key: SANDBOX_ASYNC_FLUX

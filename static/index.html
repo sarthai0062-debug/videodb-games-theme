@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=11" />
+  <link rel="stylesheet" href="/static/style.css?v=12" />
 </head>
 <body>
   <div class="app">
@@ -79,6 +79,20 @@
         <div class="hero">
           <p id="hub-pitch" class="hub-pitch"></p>
           <div id="hub-config-tags" class="tag-row"></div>
+        </div>
+
+        <div class="card config-card" id="env-config-card">
+          <div class="card-head">
+            <h2>Configuration · what your <code>.env</code> controls</h2>
+            <p class="hint">
+              These are the runtime knobs in <code>.env</code> (lines 8–25).
+              Pill = current value. Edit <code>.env</code> and restart the server to switch.
+              <a href="https://hackday.videodb.io/sandbox.html" target="_blank" rel="noopener">Sandbox guide →</a>
+            </p>
+          </div>
+          <div id="env-config-groups" class="config-groups">
+            <p class="hint">Loading configuration…</p>
+          </div>
         </div>
 
         <div class="card vdb-player-card featured">
@@ -462,7 +476,7 @@
               <tr><td><code>medium</code></td><td>$3.50 / hour</td><td>FLUX, GEMMA 4 31B, larger VLMs</td></tr>
             </tbody>
           </table>
-          <p class="hint">This app uses <code>medium</code> so FLUX + OmniVoice run on one sandbox (<code>VIDEODB_SANDBOX_TIER</code> in .env).</p>
+          <p class="hint">Medium tier ≈ $3.50/hr. Sandboxes auto-stop after <code>VIDEODB_SANDBOX_IDLE_TIMEOUT</code> seconds idle (default 600). Use <strong>Free sandbox slots</strong> to stop orphans now.</p>
         </div>
 
         <div class="card">
@@ -479,6 +493,6 @@
   </div>
 
   <script src="/static/config.js?v=1"></script>
-  <script src="/static/app.js?v=17"></script>
+  <script src="/static/app.js?v=18"></script>
 </body>
 </html>

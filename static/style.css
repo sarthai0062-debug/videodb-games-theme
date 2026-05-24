@@ -1362,3 +1362,49 @@ body {
     max-width: none;
   }
 }
+
+/* —— Configuration panel —— */
+.config-card { border: 1px solid rgba(167, 139, 250, 0.25); }
+.config-card .card-head h2 code { font-size: 0.85em; background: rgba(167,139,250,0.12); padding: 0.05rem 0.35rem; border-radius: 4px; }
+.config-groups { display: flex; flex-direction: column; gap: 1.5rem; }
+.config-group-head { margin-bottom: 0.75rem; }
+.config-group-head h3 { margin: 0 0 0.2rem; font-size: 1rem; color: #ede9fe; }
+.config-group-head p { margin: 0; color: #a1a1aa; font-size: 0.85rem; }
+.config-var-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.85rem; }
+.config-var {
+  border: 1px solid #27272a;
+  background: #121218;
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.config-var-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
+.config-var-name { font-size: 0.78rem; color: #c4b5fd; word-break: break-all; }
+.config-pill {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+.config-pill.current { background: rgba(167,139,250,0.18); color: #c4b5fd; border-color: rgba(167,139,250,0.4); }
+.config-var-summary { margin: 0; color: #d4d4d8; font-size: 0.85rem; line-height: 1.45; }
+.config-options { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.config-option {
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  background: #0c0c10;
+}
+.config-option.active { border-color: rgba(167,139,250,0.55); background: rgba(167,139,250,0.08); }
+.config-option-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.config-option-head code { font-size: 0.78rem; color: #f472b6; }
+.config-option-head span { font-size: 0.82rem; color: #e4e4e7; }
+.config-option p { margin: 0.3rem 0 0; color: #a1a1aa; font-size: 0.78rem; line-height: 1.4; }
+.config-numeric { margin: 0; color: #a1a1aa; font-size: 0.82rem; }
+.config-numeric code { color: #f472b6; background: rgba(244,114,182,0.1); padding: 0.05rem 0.3rem; border-radius: 4px; }

@@ -33,9 +33,13 @@ USAGE_PATH = ROOT_DIR / "data" / "sandbox_usage.json"
 SANDBOX_SESSION_DIR = ROOT_DIR / "data" / "sandbox_sessions"
 
 SANDBOX_HOURLY_USD = {"small": 1.0, "medium": 3.5}
-TIER_ACTIVE_LIMIT = {"small": 3, "medium": 3}
+# https://hackday.videodb.io/sandbox.html — concurrent limits per tier
+TIER_ACTIVE_LIMIT = {"small": 4, "medium": 2}
 DEFAULT_TIER = "medium"
 DEFAULT_IDLE_TIMEOUT = 600
+
+_idle_timers: dict[str, threading.Timer] = {}
+_idle_timer_lock = threading.Lock()
 
 
 def _load_env() -> None:
@@ -54,6 +58,65 @@ def _idle_timeout() -> int:
         return max(60, int(os.getenv("VIDEODB_SANDBOX_IDLE_TIMEOUT") or DEFAULT_IDLE_TIMEOUT))
     except ValueError:
         return DEFAULT_IDLE_TIMEOUT
+
+
+def _sandbox_reuse_enabled() -> bool:
+    _load_env()
+    return (os.getenv("VIDEODB_SANDBOX_REUSE") or "").strip().lower() in ("1", "true", "yes")
+
+
+def _tier_enum(tier_name: str) -> SandboxTier:
+    return SandboxTier.small if tier_name.lower() == "small" else SandboxTier.medium
+
+
+def _create_sandbox(conn: Any, tier_name: str) -> Any:
+    """Create sandbox with server-side idle_timeout so VideoDB stops billing when idle."""
+    idle = _idle_timeout()
+    return conn.create_sandbox(
+        tier=_tier_enum(tier_name),
+        idle_timeout=idle,
+    )
+
+
+def _cancel_idle_stop(session_id: str) -> None:
+    with _idle_timer_lock:
+        timer = _idle_timers.pop(session_id, None)
+    if timer:
+        timer.cancel()
+
+
+def _touch_sandbox_activity(session_id: str, session: dict[str, Any]) -> None:
+    session["last_activity_at"] = time.time()
+    _schedule_idle_stop(session_id)
+
+
+def _schedule_idle_stop(session_id: str) -> None:
+    """Stop sandbox after VIDEODB_SANDBOX_IDLE_TIMEOUT with no moves (app-side backup)."""
+    timeout = _idle_timeout()
+
+    def _run() -> None:
+        try:
+            session = load_session(session_id)
+        except FileNotFoundError:
+            return
+        if session.get("sandbox_stopped"):
+            return
+        last = session.get("last_activity_at") or session.get("sandbox_started_at")
+        if last is not None and time.time() - float(last) < timeout - 2:
+            _schedule_idle_stop(session_id)
+            return
+        logger.info("Stopping sandbox for session %s after %ss idle", session_id, timeout)
+        stop_session_sandbox(session)
+        save_session(session_id, session)
+
+    with _idle_timer_lock:
+        old = _idle_timers.pop(session_id, None)
+        if old:
+            old.cancel()
+        timer = threading.Timer(timeout, _run)
+        timer.daemon = True
+        _idle_timers[session_id] = timer
+        timer.start()
 
 
 def _flux_config() -> dict[str, Any]:
@@ -236,6 +299,8 @@ def _is_sandbox_bad(sandbox_id: str | None) -> bool:
 
 
 def _pick_reusable_sandbox(conn: Any, tier: str) -> Any | None:
+    if not _sandbox_reuse_enabled():
+        return None
     active = _list_active_for_tier(conn, tier)
     good = [sb for sb in active if not _is_sandbox_bad(sb.id)]
     return good[-1] if good else None
@@ -267,19 +332,29 @@ def _rotate_sandbox(session: dict[str, Any]) -> dict[str, Any]:
     return provision_sandbox(session)
 
 
-def _attach_sandbox_to_session(session: dict[str, Any], sb: Any, *, reused: bool) -> dict[str, Any]:
+def _attach_sandbox_to_session(
+    session: dict[str, Any],
+    sb: Any,
+    *,
+    reused: bool,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     session["sandbox_id"] = sb.id
     session["sandbox_tier"] = _tier()
     session["sandbox_status"] = sb.status
     session["sandbox_stopped"] = False
     if not session.get("sandbox_started_at"):
         session["sandbox_started_at"] = time.time()
+    session["last_activity_at"] = time.time()
+    if session_id:
+        _touch_sandbox_activity(session_id, session)
     return {
         "ok": True,
         "sandbox_id": sb.id,
         "status": sb.status,
         "tier": _tier(),
         "reused": reused,
+        "idle_timeout_sec": _idle_timeout(),
     }
 
 
@@ -341,13 +416,18 @@ def _normalize_game_type(game_type: str | None) -> str:
     return g if g in VALID_GAMES else "tic_tac_toe"
 
 
-def provision_sandbox(session: dict[str, Any]) -> dict[str, Any]:
-    """Reuse an active sandbox when possible; create only if under tier limit."""
+def provision_sandbox(
+    session: dict[str, Any],
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Spin up sandbox on demand; pass idle_timeout; stop orphans before create."""
     if not vdb.is_videodb_configured():
         return {"ok": False, "error": "VIDEO_DB_API_KEY not configured"}
 
     tier_name = _tier()
     limit = _tier_limit(tier_name)
+    sid = session_id or session.get("session_id")
 
     try:
         conn = _connect()
@@ -358,60 +438,67 @@ def provision_sandbox(session: dict[str, Any]) -> dict[str, Any]:
     if sandbox_id and _is_sandbox_bad(sandbox_id):
         session.pop("sandbox_id", None)
         sandbox_id = None
-    if sandbox_id:
+    if sandbox_id and not session.get("sandbox_stopped"):
         try:
             sb = conn.get_sandbox(sandbox_id)
             sb.refresh()
             if sb.is_active:
                 session["sandbox_status"] = sb.status
-                return _attach_sandbox_to_session(session, sb, reused=True)
+                return _attach_sandbox_to_session(session, sb, reused=True, session_id=sid)
         except Exception:
-            pass
+            session.pop("sandbox_id", None)
 
     reusable = _pick_reusable_sandbox(conn, tier_name)
     if reusable:
-        return _attach_sandbox_to_session(session, reusable, reused=True)
+        return _attach_sandbox_to_session(session, reusable, reused=True, session_id=sid)
 
     active = _list_active_for_tier(conn, tier_name)
     if len(active) >= limit:
         cleanup_extra_sandboxes(keep=max(0, limit - 1), tier=tier_name)
         reusable = _pick_reusable_sandbox(conn, tier_name)
         if reusable:
-            return _attach_sandbox_to_session(session, reusable, reused=True)
+            return _attach_sandbox_to_session(session, reusable, reused=True, session_id=sid)
 
     try:
-        sandbox = conn.create_sandbox(tier=tier_name)
+        sandbox = _create_sandbox(conn, tier_name)
         session["sandbox_id"] = sandbox.id
         session["sandbox_tier"] = tier_name
         session["sandbox_status"] = sandbox.status
         session["sandbox_started_at"] = time.time()
         session["sandbox_stopped"] = False
+        session["last_activity_at"] = time.time()
         sandbox.wait_for_ready(timeout=300, interval=5)
         session["sandbox_status"] = sandbox.status
+        if sid:
+            _touch_sandbox_activity(sid, session)
         return {
             "ok": True,
             "sandbox_id": sandbox.id,
             "status": sandbox.status,
             "tier": tier_name,
             "reused": False,
+            "idle_timeout_sec": _idle_timeout(),
         }
     except Exception as e:
         err = str(e)
         if "Maximum active sandboxes" in err:
-            cleanup = cleanup_extra_sandboxes(keep=1, tier=tier_name)
+            cleanup = cleanup_extra_sandboxes(keep=0, tier=tier_name)
             reusable = _pick_reusable_sandbox(conn, tier_name)
             if reusable:
-                return _attach_sandbox_to_session(session, reusable, reused=True)
+                return _attach_sandbox_to_session(session, reusable, reused=True, session_id=sid)
             if cleanup.get("stopped_count", 0) > 0:
                 try:
-                    sandbox = conn.create_sandbox(tier=tier_name)
+                    sandbox = _create_sandbox(conn, tier_name)
                     session["sandbox_id"] = sandbox.id
                     session["sandbox_tier"] = tier_name
                     session["sandbox_status"] = sandbox.status
                     session["sandbox_started_at"] = time.time()
                     session["sandbox_stopped"] = False
+                    session["last_activity_at"] = time.time()
                     sandbox.wait_for_ready(timeout=300, interval=5)
                     session["sandbox_status"] = sandbox.status
+                    if sid:
+                        _touch_sandbox_activity(sid, session)
                     return {
                         "ok": True,
                         "sandbox_id": sandbox.id,
@@ -419,6 +506,7 @@ def provision_sandbox(session: dict[str, Any]) -> dict[str, Any]:
                         "tier": tier_name,
                         "reused": False,
                         "cleaned_up": cleanup.get("stopped"),
+                        "idle_timeout_sec": _idle_timeout(),
                     }
                 except Exception as e2:
                     err = str(e2)
@@ -431,6 +519,18 @@ def provision_sandbox(session: dict[str, Any]) -> dict[str, Any]:
                 "cleanup": cleanup,
             }
         return {"ok": False, "error": err[:300]}
+
+
+def stop_orphan_sandboxes_on_startup() -> dict[str, Any]:
+    """Stop all active sandboxes when the API boots (recovers abandoned dev sessions)."""
+    _load_env()
+    raw = (os.getenv("VIDEODB_SANDBOX_STOP_ON_STARTUP") or "true").strip().lower()
+    if raw in ("0", "false", "no"):
+        return {"ok": True, "skipped": True}
+    if not vdb.is_videodb_configured():
+        return {"ok": False, "error": "VIDEO_DB_API_KEY not configured"}
+    logger.info("Stopping orphan sandboxes on startup (tier=%s)", _tier())
+    return cleanup_extra_sandboxes(keep=0, tier=_tier())
 
 
 def generate_flux_turn_art(
@@ -611,10 +711,17 @@ def build_sandbox_recap(session: dict[str, Any]) -> dict[str, Any]:
         return {**empty, "error": str(e)[:300]}
 
 
-def stop_session_sandbox(session: dict[str, Any]) -> dict[str, Any]:
+def stop_session_sandbox(
+    session: dict[str, Any],
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    if session_id:
+        _cancel_idle_stop(session_id)
     _record_sandbox_runtime(session)
     sandbox_id = session.get("sandbox_id")
     if not sandbox_id:
+        session["sandbox_stopped"] = True
         return {"ok": True, "stopped": False}
     try:
         conn = _connect()
@@ -657,10 +764,15 @@ def get_usage_payload(session_id: str | None = None) -> dict[str, Any]:
 
     return {
         "ok": True,
+        "idle_timeout_sec": _idle_timeout(),
         "pricing": {
             "sandbox_small_per_hour": SANDBOX_HOURLY_USD["small"],
             "sandbox_medium_per_hour": SANDBOX_HOURLY_USD["medium"],
-            "note": "Hackathon credits: ~$1000/team. Stop sandbox when idle.",
+            "note": (
+                "Medium ≈ $3.50/hr. Sandboxes auto-stop after "
+                f"{_idle_timeout()}s idle (VideoDB idle_timeout + app timer). "
+                "Use Usage → Free sandbox slots to stop orphans immediately."
+            ),
         },
         "global": global_u,
         "session": session_u,
@@ -724,6 +836,7 @@ def start_sandbox_session(game_type: str = "tic_tac_toe") -> dict[str, Any]:
     session: dict[str, Any] = {
         "session_id": session_id,
         "kind": "sandbox",
+        "last_activity_at": None,
         "game_type": game_type,
         "state": ig.initial_state(game_type),
         "moves": [],
@@ -737,16 +850,25 @@ def start_sandbox_session(game_type: str = "tic_tac_toe") -> dict[str, Any]:
         "recap_player_url": None,
         "recap_embed_url": None,
     }
-    prov = provision_sandbox(session)
     save_session(session_id, session)
     st = session["state"]
+    idle = _idle_timeout()
     return {
         "session_id": session_id,
         "game_type": game_type,
         "state": st,
         "board": st.get("board"),
         "current_player": st.get("current_player"),
-        "sandbox": prov,
+        "sandbox": {
+            "ok": True,
+            "lazy": True,
+            "status": "pending",
+            "message": (
+                f"Sandbox starts on your first move and auto-stops after {idle}s idle "
+                f"(VideoDB idle_timeout + app timer)."
+            ),
+            "idle_timeout_sec": idle,
+        },
         "usage": _session_usage(session),
         "games": ig.GAME_CATALOG,
     }
@@ -790,6 +912,7 @@ def _apply_flux_to_session_move(session_id: str) -> None:
         if flux.get("generation_ok"):
             usage = _session_usage(session)
             usage["flux_images"] = int(usage.get("flux_images", 0)) + 1
+        _touch_sandbox_activity(session_id, session)
         save_session(session_id, session)
     except Exception as e:
         logger.exception("FLUX background job failed for %s", session_id)
@@ -825,11 +948,13 @@ def play_sandbox_action(session_id: str, action: dict[str, Any]) -> dict[str, An
 
     sandbox_id = session.get("sandbox_id")
     if not _sandbox_is_active(session):
-        prov = provision_sandbox(session)
+        prov = provision_sandbox(session, session_id=session_id)
         if not prov.get("ok"):
             save_session(session_id, session)
             raise ValueError(prov.get("error") or "Sandbox not available")
         sandbox_id = session.get("sandbox_id")
+    else:
+        _touch_sandbox_activity(session_id, session)
 
     flux: dict[str, Any]
     flux_pending = False
@@ -894,7 +1019,7 @@ def _apply_recap_to_session(session_id: str) -> None:
         session["recap_embed_url"] = recap.get("embed_url")
         session["recap_error"] = recap.get("error")
         session["recap_status"] = "done" if recap.get("stream_url") else "failed"
-        stop_session_sandbox(session)
+        stop_session_sandbox(session, session_id=session_id)
         _merge_session_usage_to_global(session)
         save_session(session_id, session)
     except Exception as e:
@@ -903,6 +1028,7 @@ def _apply_recap_to_session(session_id: str) -> None:
             session = load_session(session_id)
             session["recap_status"] = "failed"
             session["recap_error"] = _clean_error(str(e))
+            stop_session_sandbox(session, session_id=session_id)
             save_session(session_id, session)
         except Exception:
             pass
@@ -953,7 +1079,7 @@ def finish_sandbox_session(session_id: str) -> dict[str, Any]:
     session["recap_embed_url"] = recap.get("embed_url")
     session["recap_status"] = "done" if recap.get("stream_url") else "failed"
     session["recap_error"] = recap.get("error")
-    stop_session_sandbox(session)
+    stop_session_sandbox(session, session_id=session_id)
     _merge_session_usage_to_global(session)
     save_session(session_id, session)
     return {
@@ -1019,5 +1145,7 @@ def get_status_payload() -> dict[str, Any]:
         "sandboxes": sandboxes,
         "games": ig.GAME_CATALOG,
         "docs_url": "https://hackday.videodb.io/sandbox.html",
+        "idle_timeout_sec": _idle_timeout(),
+        "reuse_enabled": _sandbox_reuse_enabled(),
         "usage": load_global_usage(),
     }

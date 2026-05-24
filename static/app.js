@@ -254,6 +254,75 @@ function setConnUi(ok, label, collectionId, error, collectionName) {
   }
 }
 
+const envConfigGroups = document.getElementById("env-config-groups");
+
+function renderEnvConfig(payload) {
+  if (!envConfigGroups) return;
+  if (!payload || !payload.ok || !Array.isArray(payload.groups)) {
+    envConfigGroups.innerHTML =
+      '<p class="hint">Could not load configuration manifest.</p>';
+    return;
+  }
+  const html = payload.groups
+    .map((group) => {
+      const vars = (group.variables || [])
+        .map((v) => {
+          const isEnum = v.kind === "enum" && Array.isArray(v.options);
+          const optionsHtml = isEnum
+            ? `<ul class="config-options">
+                ${v.options
+                  .map(
+                    (opt) => `
+                  <li class="config-option ${opt.current ? "active" : ""}">
+                    <div class="config-option-head">
+                      <code>${escapeHtml(opt.value)}</code>
+                      <span>${escapeHtml(opt.label || "")}</span>
+                      ${opt.current ? '<span class="config-pill">current</span>' : ""}
+                    </div>
+                    <p>${escapeHtml(opt.desc || "")}</p>
+                  </li>`
+                  )
+                  .join("")}
+              </ul>`
+            : `<p class="config-numeric">
+                Allowed: <code>${escapeHtml(v.range || "—")}</code>
+                · Default: <code>${escapeHtml(String(v.default ?? "—"))}</code>
+              </p>`;
+          return `
+            <article class="config-var">
+              <header class="config-var-head">
+                <code class="config-var-name">${escapeHtml(v.name)}</code>
+                <span class="config-pill current">${escapeHtml(String(v.current))}</span>
+              </header>
+              <p class="config-var-summary">${escapeHtml(v.summary || "")}</p>
+              ${optionsHtml}
+            </article>`;
+        })
+        .join("");
+      return `
+        <section class="config-group">
+          <header class="config-group-head">
+            <h3>${escapeHtml(group.title)}</h3>
+            <p>${escapeHtml(group.summary || "")}</p>
+          </header>
+          <div class="config-var-grid">${vars}</div>
+        </section>`;
+    })
+    .join("");
+  envConfigGroups.innerHTML = html;
+}
+
+async function loadEnvConfig() {
+  if (!envConfigGroups) return;
+  try {
+    const data = await api("/api/videodb/config");
+    renderEnvConfig(data);
+  } catch (e) {
+    envConfigGroups.innerHTML =
+      `<p class="hint">Could not load configuration: ${escapeHtml(formatApiError(e))}</p>`;
+  }
+}
+
 function renderConfigTags(data) {
   if (!hubConfigTags) return;
   const tags = [
@@ -1275,6 +1344,7 @@ async function init() {
   const hubPromise = refreshVdbHub().catch((e) => {
     setConnUi(false, "Offline", null, formatApiError(e));
   });
+  loadEnvConfig().catch(() => {});
   const gamePromise = startGame().catch((e) => {
     setStatus(formatApiError(e), "warn");
   });
@@ -1464,7 +1534,12 @@ async function finishRecap() {
 }
 
 if (vdbTestBtn) vdbTestBtn.addEventListener("click", testVdbConnection);
-if (vdbRefreshBtn) vdbRefreshBtn.addEventListener("click", refreshVdbHub);
+if (vdbRefreshBtn) {
+  vdbRefreshBtn.addEventListener("click", () => {
+    refreshVdbHub();
+    loadEnvConfig();
+  });
+}
 if (vdbExportBtn) vdbExportBtn.addEventListener("click", exportMoveLog);
 if (vdbCloudRecapBtn) vdbCloudRecapBtn.addEventListener("click", buildCloudRecap);
 if (vdbAttachBtn) vdbAttachBtn.addEventListener("click", attachAndIndexCapture);
@@ -1925,7 +2000,7 @@ async function cleanupSandboxes() {
   if (usageCleanupBtn) usageCleanupBtn.disabled = true;
   setStatus("Stopping extra sandboxes…", "warn");
   try {
-    const data = await api("/api/sandbox/cleanup?keep=1", { method: "POST" });
+    const data = await api("/api/sandbox/cleanup?keep=0", { method: "POST" });
     setStatus(
       `Stopped ${data.stopped_count || 0} sandbox(es) · ${data.active_remaining ?? 0} active`,
       "ok"
@@ -1943,6 +2018,18 @@ async function refreshSandboxPanel() {
   if (!sbCatalog.length) await loadSbCatalog();
 }
 
+async function stopSandboxCompute(sessionId, { quiet = false } = {}) {
+  const sid = sessionId || sandboxSessionId;
+  if (!sid) return;
+  try {
+    await api(`/api/sandbox/session/${sid}/stop`, { method: "POST" });
+    if (!quiet) setStatus("Sandbox compute stopped — billing paused", "ok");
+    if (sbSandboxId) sbSandboxId.textContent = "Sandbox stopped (idle / session ended)";
+  } catch (e) {
+    if (!quiet) setStatus(formatApiError(e) || "Stop sandbox failed", "warn");
+  }
+}
+
 async function startSandboxGame() {
   sbBusy = true;
   sbFinished = false;
@@ -1952,7 +2039,10 @@ async function startSandboxGame() {
   sbBtnFinish.disabled = true;
   showSbPlayer({});
   showSbArena();
-  setStatus("Provisioning sandbox (1–3 min first time)…", "warn");
+  if (sandboxSessionId) {
+    await stopSandboxCompute(sandboxSessionId, { quiet: true });
+  }
+  setStatus("Starting game session (sandbox spins up on first move)…", "warn");
 
   try {
     const data = await api("/api/sandbox/session/start", {
@@ -1970,13 +2060,24 @@ async function startSandboxGame() {
       sbTurnLabel.textContent =
         sbGameType === "tic_tac_toe" ? "Your turn (X)" : "Take your action";
     }
-    if (data.sandbox?.sandbox_id && sbSandboxId) {
-      const reused = data.sandbox.reused ? " · reused" : "";
-      sbSandboxId.textContent = `Sandbox ${data.sandbox.sandbox_id} · ${data.sandbox.status}${reused}`;
+    if (sbSandboxId) {
+      if (data.sandbox?.sandbox_id) {
+        const reused = data.sandbox.reused ? " · reused" : "";
+        sbSandboxId.textContent = `Sandbox ${data.sandbox.sandbox_id} · ${data.sandbox.status}${reused}`;
+      } else if (data.sandbox?.lazy) {
+        const idle = data.sandbox.idle_timeout_sec || 600;
+        sbSandboxId.textContent = `Compute starts on first move · auto-stops after ${idle}s idle`;
+      }
     }
     renderSessionUsage(data.usage);
+    const idleSec = data.sandbox?.idle_timeout_sec || 600;
     const reusedMsg = data.sandbox?.reused ? " (reused existing sandbox)" : "";
-    setStatus(`Sandbox ready${reusedMsg} — play a move`, "ok");
+    setStatus(
+      data.sandbox?.lazy
+        ? `Session ready — first move provisions sandbox (auto-stops after ${idleSec}s idle)`
+        : `Sandbox ready${reusedMsg} — play a move`,
+      "ok",
+    );
   } catch (e) {
     const msg = formatApiError(e);
     if (msg.includes("Maximum active sandboxes")) {
@@ -2071,5 +2172,16 @@ async function loadSbCatalog() {
   }
 }
 loadSbCatalog();
+
+window.addEventListener("beforeunload", () => {
+  if (!sandboxSessionId) return;
+  const base = API_BASE || "";
+  const url = `${base}/api/sandbox/session/${sandboxSessionId}/stop`;
+  try {
+    fetch(url, { method: "POST", keepalive: true });
+  } catch (e) {
+    /* ignore */
+  }
+});
 
 init();
